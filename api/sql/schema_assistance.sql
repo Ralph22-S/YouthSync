@@ -1,6 +1,6 @@
 -- YouthSync Phase 5 — Assistance (SK Official)
 -- Non-destructive. Does not drop Phase 1–4 tables or data.
--- System assistance types are seeded by import_phase5.php.
+-- System assistance types are seeded by import_assistance.php.
 
 SET NAMES utf8mb4;
 

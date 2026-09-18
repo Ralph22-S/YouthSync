@@ -12,9 +12,9 @@ require dirname(__DIR__) . '/config/database.php';
 $pdo = youthsync_pdo();
 $pdo->exec('USE `' . str_replace('`', '', youthsync_env('DB_NAME', 'youthsync')) . '`');
 
-$schema = file_get_contents(__DIR__ . '/schema_phase2.sql');
+$schema = file_get_contents(__DIR__ . '/schema_youth.sql');
 if ($schema === false) {
-    fwrite(STDERR, "Missing schema_phase2.sql\n");
+    fwrite(STDERR, "Missing schema_youth.sql\n");
     exit(1);
 }
 

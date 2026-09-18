@@ -71,6 +71,12 @@ function payload(array $t): array
     return is_array($decoded) ? $decoded : [];
 }
 
+function attendanceIdFrom(array $t): int
+{
+    $data = payload($t)['data'] ?? [];
+    return (int) ($data['attendance']['id'] ?? $data['id'] ?? 0);
+}
+
 $sk1 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p4_sk1.txt';
 $sk2 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p4_sk2.txt';
 $empty = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p4_empty.txt';
@@ -163,7 +169,7 @@ $scan = req('scan_valid', 'POST', "$base/sk/attendance/scan", json_encode([
 ]), $sk1);
 $tests[] = $scan;
 $expect['scan_valid'] = [201, 200];
-$attendanceId = (int) (payload($scan)['data']['attendance']['id'] ?? 0);
+$attendanceId = attendanceIdFrom($scan);
 if ($attendanceId) {
     $createdAttendanceIds[] = $attendanceId;
 }
@@ -181,40 +187,60 @@ $tests[] = req('confirm_attendance', 'POST', "$base/sk/attendance/confirm", json
 ]), $sk1);
 $expect['confirm_attendance'] = [200];
 
-$tests[] = req('scan_duplicate', 'POST', "$base/sk/attendance/scan", json_encode([
+$scanDuplicate = req('scan_duplicate', 'POST', "$base/sk/attendance/scan", json_encode([
     'token' => $youthQr,
     'sessionToken' => $sessionToken,
     'programId' => $programId,
 ]), $sk1);
+$tests[] = $scanDuplicate;
 $expect['scan_duplicate'] = [409];
+if ($id = attendanceIdFrom($scanDuplicate)) {
+    $createdAttendanceIds[] = $id;
+}
 
-$tests[] = req('scan_invalid_qr', 'POST', "$base/sk/attendance/scan", json_encode([
+$scanInvalid = req('scan_invalid_qr', 'POST', "$base/sk/attendance/scan", json_encode([
     'token' => 'NOT-A-YOUTH-QR',
     'sessionToken' => $sessionToken,
 ]), $sk1);
+$tests[] = $scanInvalid;
 $expect['scan_invalid_qr'] = [422, 404];
+if ($id = attendanceIdFrom($scanInvalid)) {
+    $createdAttendanceIds[] = $id;
+}
 
-$tests[] = req('scan_unknown_youth', 'POST', "$base/sk/attendance/scan", json_encode([
+$scanUnknown = req('scan_unknown_youth', 'POST', "$base/sk/attendance/scan", json_encode([
     'token' => 'YSYOUTH-YTH-999999',
     'sessionToken' => $sessionToken,
 ]), $sk1);
+$tests[] = $scanUnknown;
 $expect['scan_unknown_youth'] = [404, 422];
+if ($id = attendanceIdFrom($scanUnknown)) {
+    $createdAttendanceIds[] = $id;
+}
 
 if ($sessionId) {
     $exp = $pdo->prepare('UPDATE attendance_qr_tokens SET expires_at = :exp WHERE id = :id');
     $exp->execute(['exp' => '2000-01-01 00:00:00', 'id' => $sessionId]);
 }
-$tests[] = req('scan_expired_session', 'POST', "$base/sk/attendance/scan", json_encode([
+$scanExpired = req('scan_expired_session', 'POST', "$base/sk/attendance/scan", json_encode([
     'token' => $youthQr,
     'sessionToken' => $sessionToken,
 ]), $sk1);
+$tests[] = $scanExpired;
 $expect['scan_expired_session'] = [422, 404];
+if ($id = attendanceIdFrom($scanExpired)) {
+    $createdAttendanceIds[] = $id;
+}
 
-$tests[] = req('scan_bogus_session', 'POST', "$base/sk/attendance/scan", json_encode([
+$scanBogus = req('scan_bogus_session', 'POST', "$base/sk/attendance/scan", json_encode([
     'token' => $youthQr,
     'sessionToken' => bin2hex(random_bytes(32)),
 ]), $sk1);
+$tests[] = $scanBogus;
 $expect['scan_bogus_session'] = [404, 422];
+if ($id = attendanceIdFrom($scanBogus)) {
+    $createdAttendanceIds[] = $id;
+}
 
 $tests[] = req('login_sk2', 'POST', "$base/auth/login", $login('sk2@demo.test'), $sk2);
 $expect['login_sk2'] = [200];
@@ -271,19 +297,32 @@ if ($freshSessionId) {
     $createdSessionIds[] = $freshSessionId;
 }
 
-$tests[] = req('cross_scan_other_youth', 'POST', "$base/sk/attendance/scan", json_encode([
-    'token' => $otherQr,
+// Youth codes are unique per organization, not globally. Do not scan another
+// org's sequential code (e.g. YTH-0002) — it can match SK1's own youth.
+$foreignQr = 'YSYOUTH-YTH-9999';
+$crossScan = req('cross_scan_other_youth', 'POST', "$base/sk/attendance/scan", json_encode([
+    'token' => $foreignQr,
     'sessionToken' => $freshToken,
     'organization_id' => 2,
 ]), $sk1);
-$expect['cross_scan_other_youth'] = [404, 403];
+$tests[] = $crossScan;
+$expect['cross_scan_other_youth'] = [404, 422, 403];
+$crossScanAttendanceId = attendanceIdFrom($crossScan);
+if ($crossScanAttendanceId) {
+    $createdAttendanceIds[] = $crossScanAttendanceId;
+}
 
-$tests[] = req('cross_use_sk1_session', 'POST', "$base/sk/attendance/scan", json_encode([
+$crossSession = req('cross_use_sk1_session', 'POST', "$base/sk/attendance/scan", json_encode([
     'token' => $otherQr,
     'sessionToken' => $freshToken,
     'organization_id' => 1,
 ]), $sk2);
+$tests[] = $crossSession;
 $expect['cross_use_sk1_session'] = [404, 403];
+$crossSessionAttendanceId = attendanceIdFrom($crossSession);
+if ($crossSessionAttendanceId) {
+    $createdAttendanceIds[] = $crossSessionAttendanceId;
+}
 
 $tests[] = req('logout', 'POST', "$base/auth/logout", null, $sk1);
 $expect['logout'] = [200];
@@ -370,9 +409,18 @@ foreach ($tests as $t) {
             $failed[] = 'list_attendance did not include scanned record';
         }
     }
+    if ($t['name'] === 'cross_scan_other_youth') {
+        $attachedYouth = (int) (payload($t)['data']['attendance']['youthId']
+            ?? payload($t)['data']['youth']['id']
+            ?? 0);
+        if ($t['status'] === 201 || $t['status'] === 200) {
+            $failed[] = 'foreign/nonexistent QR created attendance for an SK1 youth';
+        }
+        if ($otherYouthId > 0 && $attachedYouth === $otherYouthId) {
+            $failed[] = 'scan attached the other organization\'s youth row';
+        }
+    }
     if ($t['name'] === 'create_program') {
-        $orgId = (int) (payload($t)['data']['organizationId'] ?? payload($t)['data']['organization_id'] ?? 0);
-        // program payload does not include org id; spoof ignored if record was created for sk1
         if ($programId < 1) {
             $failed[] = 'create_program did not return an id (org spoof may have been trusted)';
         }

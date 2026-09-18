@@ -1,6 +1,6 @@
 -- YouthSync Phase 4 — Attendance & QR (SK Official)
 -- Non-destructive. Does not drop Phase 1–3 tables or data.
--- organizations.qr_uses is added by import_phase4.php when missing.
+-- organizations.qr_uses is added by import_attendance.php when missing.
 
 SET NAMES utf8mb4;
 

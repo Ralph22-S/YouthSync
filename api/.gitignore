@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 /logs/*.log
 /uploads/*
 /storage/remember_tokens.json

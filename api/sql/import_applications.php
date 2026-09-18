@@ -11,19 +11,9 @@ require dirname(__DIR__) . '/config/database.php';
 
 $pdo = youthsync_pdo();
 
-$qrCol = $pdo->query("SHOW COLUMNS FROM organizations LIKE 'qr_uses'")->fetch();
-if ($qrCol === false) {
-    $pdo->exec(
-        'ALTER TABLE organizations ADD COLUMN qr_uses INT UNSIGNED NOT NULL DEFAULT 0 AFTER youth_count'
-    );
-    echo "organizations.qr_uses added.\n";
-} else {
-    echo "organizations.qr_uses already present.\n";
-}
-
-$schema = file_get_contents(__DIR__ . '/schema_phase4.sql');
+$schema = file_get_contents(__DIR__ . '/schema_applications.sql');
 if ($schema === false) {
-    fwrite(STDERR, "Missing schema_phase4.sql\n");
+    fwrite(STDERR, "Missing schema_applications.sql\n");
     exit(1);
 }
 
@@ -41,10 +31,10 @@ foreach (array_filter(array_map('trim', explode(';', $schema))) as $statement) {
     }
 }
 
-echo "attendance tables ensured.\n";
+echo "application tables ensured.\n";
 echo "tables: " . implode(',', $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN)) . PHP_EOL;
-echo "attendance=" . $pdo->query('SELECT COUNT(*) FROM attendance')->fetchColumn() . PHP_EOL;
-echo "attendance_qr_tokens=" . $pdo->query('SELECT COUNT(*) FROM attendance_qr_tokens')->fetchColumn() . PHP_EOL;
-echo "programs=" . $pdo->query('SELECT COUNT(*) FROM programs')->fetchColumn() . PHP_EOL;
+echo "applications=" . $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn() . PHP_EOL;
+echo "application_submissions=" . $pdo->query('SELECT COUNT(*) FROM application_submissions')->fetchColumn() . PHP_EOL;
+echo "assistance_programs=" . $pdo->query('SELECT COUNT(*) FROM assistance_programs')->fetchColumn() . PHP_EOL;
 echo "youth=" . $pdo->query('SELECT COUNT(*) FROM youth')->fetchColumn() . PHP_EOL;
 echo "users=" . $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() . PHP_EOL;

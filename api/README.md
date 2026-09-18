@@ -1,14 +1,22 @@
-# YouthSync SK Official API — Phase 1
+# YouthSync SK Official API
 
-This folder is the **PHP backend**. It is separate from the React app in `youth-sync/`.
+PHP 8 + MySQL backend for **SK Official** only. The React app lives in `youth-sync/`.
+
+**Team setup, demo accounts, XAMPP, and limitations:** see the repository root [`README.md`](../README.md).
 
 | Piece | Needs |
 |---|---|
-| React UI (`npm install` / `npm run dev`) | Node.js only. **Does not** need MySQL. |
-| This API | **Apache** (XAMPP) + **PHP 8.x** |
-| Login and data | **MySQL / MariaDB** |
+| React UI (`npm install` / `npm run dev`) | Node.js. Vite on http://localhost:5173 |
+| This API | Apache (XAMPP) + PHP 8.x |
+| Login and data | MySQL / MariaDB, database `youthsync`, port **3307** on this machine |
 
-Phase 1 provides SK Official **authentication only**. Youth CRUD, programs, and the rest are not implemented yet. The React frontend still uses mock data and is **not** wired to this API.
+Base URL: `http://localhost/YouthSync_UI_Refresh/api`
+
+SK Official demo: `sk1@demo.test` / `YouthSync1!` (local only). The API never returns this password or `password_hash`.
+
+`seed.sql` is **INSERT IGNORE** and is meant for a **fresh** database (or to add missing seed rows). `sql/setup_fresh.php` **refuses** to import if tables already exist. Do not DROP/TRUNCATE a populated database to “reset” it.
+
+Copy `api/.env.example` to `api/.env`. Set `DB_PORT=3307`. Keep `DEMO_MODE=false` unless you intentionally want `sk1@demo.test` to accept any non-empty password in development.
 
 ---
 
@@ -78,9 +86,9 @@ If you see a directory listing or 404, enable `mod_rewrite` and `AllowOverride A
 
 ---
 
-## 7. Start the React frontend separately (optional)
+## 7. Start the React frontend
 
-The UI does **not** call this API yet (frontend integration is a later phase).
+The UI **does** call this API for SK Official sessions (`VITE_API_BASE_URL`). Apache + MySQL must be running.
 
 ```bat
 cd C:\xampp\htdocs\YouthSync_UI_Refresh\youth-sync
@@ -144,12 +152,12 @@ Live youth capacity is counted from non-archived rows in `youth`, not from `orga
 
 ---
 
-## Phase 2 — Youth API (after schema_phase2)
+## Youth API (after schema_youth.sql)
 
 Apply the Phase 2 schema (does not drop Phase 1 data):
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase2.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_youth.php
 ```
 
 Then, as a logged-in SK Official:
@@ -172,8 +180,8 @@ See `API_DOCUMENTATION.md`.
 Apply the Phase 3 schema (does not drop Phase 1/2 data):
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase3.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase3_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_programs.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\programs_http_test.php
 ```
 
 Programs and events share the `programs` table (`kind` = `program` or `event`). SK Official only. See `API_DOCUMENTATION.md`.
@@ -185,8 +193,8 @@ Programs and events share the `programs` table (`kind` = `program` or `event`). 
 Apply the Phase 4 schema (does not drop Phase 1–3 data):
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase4.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase4_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_attendance.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\attendance_http_test.php
 ```
 
 SK Official only. Youth personal QR (`YSYOUTH-YTH-####`) is scanned by SK for attendance. Program QR (`YSPROG-{id}`) is print-only; youth self-registration is not implemented. Attendance is not program registration.
@@ -198,8 +206,8 @@ SK Official only. Youth personal QR (`YSYOUTH-YTH-####`) is scanned by SK for at
 Apply the Phase 5 schema (does not drop Phase 1–4 data):
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase5.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase5_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_assistance.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\assistance_http_test.php
 ```
 
 SK Official only. Assistance programs, system/custom types, beneficiaries, and assistance requirements. Youth applications/review queue is Phase 6.
@@ -211,8 +219,8 @@ SK Official only. Assistance programs, system/custom types, beneficiaries, and a
 Apply the Phase 6 schema (does not drop Phase 1–5 data):
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase6.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase6_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_applications.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\applications_http_test.php
 ```
 
 SK Official review of youth applications to assistance programs. Approve uses existing Phase 5 beneficiary rules (slots, archived youth, org isolation). No youth portal, notifications, or program-registration applications.
@@ -224,8 +232,8 @@ SK Official review of youth applications to assistance programs. Approve uses ex
 Apply the Phase 7 schema (does not drop Phase 1–6 data):
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase7.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase7_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_notifications.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\notifications_http_test.php
 ```
 
 SK Official in-app inbox only. SMS, email, push, and outbox are not implemented. Organization and recipient always come from the session/server; client `organization_id` / `user_id` / `created_by` are ignored.
@@ -237,7 +245,7 @@ SK Official in-app inbox only. SMS, email, push, and outbox are not implemented.
 No schema change. Reads existing Phase 1–7 tables only.
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase8_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\dashboard_reports_http_test.php
 ```
 
 SK Official dashboard and read-only reports. Organization always comes from the session. CSV/Excel/PDF export and subscription reports are not implemented.
@@ -249,7 +257,7 @@ SK Official dashboard and read-only reports. Organization always comes from the 
 No schema change. Uses `organizations.plan`, `sub_status`, `cycle`, `expires_at`, `qr_uses` and existing `PlanLimits`.
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase9_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\subscription_http_test.php
 ```
 
 Read-only SK Official subscription and usage. Checkout, billing, payment gateways, and self-serve upgrades are not implemented. Expired / cancelled / `payment_failed` still apply Free limits via existing `PlanLimits::effective()`.
@@ -261,7 +269,7 @@ Read-only SK Official subscription and usage. Checkout, billing, payment gateway
 No schema change. Reuses `users`, `roles`, and `organization_users`.
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase10_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\users_http_test.php
 ```
 
 SK Official management of SK Official staff in the session organization only. Role is always `SK_OFFICIAL` (resolved server-side). Youth accounts, admin roles, and payment flows are not implemented.

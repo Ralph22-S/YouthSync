@@ -11,9 +11,9 @@ require dirname(__DIR__) . '/config/database.php';
 
 $pdo = youthsync_pdo();
 
-$schema = file_get_contents(__DIR__ . '/schema_phase5.sql');
+$schema = file_get_contents(__DIR__ . '/schema_assistance.sql');
 if ($schema === false) {
-    fwrite(STDERR, "Missing schema_phase5.sql\n");
+    fwrite(STDERR, "Missing schema_assistance.sql\n");
     exit(1);
 }
 

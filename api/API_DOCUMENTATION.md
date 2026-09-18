@@ -1,6 +1,12 @@
-# YouthSync API — Phase 1
+# YouthSync API
 
 Base URL: `http://localhost/YouthSync_UI_Refresh/api`
+
+SK Official cookie session. Demo login (local only): `sk1@demo.test` / `YouthSync1!`. Responses never include `password_hash`.
+
+Team setup: repository root `README.md`. Endpoint details below cover auth plus SK youth, programs, attendance/QR, assistance, applications, notifications, dashboard, reports, subscription, and users.
+
+**Out of scope here:** Semaphore SMS, Brevo email, payment gateways, cron, file uploads, Youth Portal APIs, System Administrator APIs.
 
 All responses are JSON (`Content-Type: application/json`).
 
@@ -326,8 +332,8 @@ Same rows with `kind=event`:
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase3.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase3_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_programs.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\programs_http_test.php
 ```
 
 ---
@@ -421,8 +427,8 @@ Password hashes, `token_hash`, and database credentials are never returned.
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase4.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase4_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_attendance.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\attendance_http_test.php
 ```
 
 ---
@@ -475,8 +481,8 @@ Required on create: `name`, `category`.
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase5.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase5_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_assistance.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\assistance_http_test.php
 ```
 
 ---
@@ -514,8 +520,8 @@ Reject without a reason: **422**. Invalid status: **422**.
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase6.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase6_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_applications.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\applications_http_test.php
 ```
 
 ---
@@ -548,8 +554,8 @@ Item fields: `id`, `type` / `category`, `title`, `message` / `body`, `link`, `re
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_phase7.php
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase7_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_notifications.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\notifications_http_test.php
 ```
 
 ---
@@ -577,7 +583,7 @@ Unauthenticated: **401**. Non-SK Official: **403**.
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase8_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\dashboard_reports_http_test.php
 ```
 
 ---
@@ -610,7 +616,7 @@ Unauthenticated: **401**. Non-SK Official: **403**.
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase9_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\subscription_http_test.php
 ```
 
 ---
@@ -639,7 +645,7 @@ Cannot deactivate or delete self. Cannot delete the owner. Cannot deactivate the
 ## Run tests
 
 ```bat
-C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\phase10_http_test.php
+C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\users_http_test.php
 ```
 
 

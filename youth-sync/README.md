@@ -1,86 +1,62 @@
-# YouthSync — frontend
+# YouthSync — React frontend
 
-React 18 + Vite + Tailwind. Frontend only: no backend, no API, no database.
-State is held in React and persisted to `localStorage`, structured so the data layer
-can be replaced with API responses without redesigning the UI.
+React 18 + Vite + Tailwind. SK Official screens talk to the PHP API when you sign in as an SK Official (`credentials: include`, cookie session).
+
+Youth Portal and System Administrator screens still use **mock data + `localStorage`**. They are not the SK backend.
+
+Team setup (XAMPP, demo accounts, limitations): see the repository root `README.md`.
 
 ## Run
 
-```bash
+Apache and MySQL must already be running so `http://localhost/YouthSync_UI_Refresh/api` answers.
+
+```bat
+cd C:\xampp\htdocs\YouthSync_UI_Refresh\youth-sync
 npm install
 npm run dev
 ```
 
 http://localhost:5173
 
-## Sign-in accounts
+Copy `.env.example` to `.env` if needed:
 
-Credentials are kept out of the interface. Any password is accepted while there is no
-backend authentication.
+```
+VITE_API_BASE_URL=http://localhost/YouthSync_UI_Refresh/api
+```
 
-| Role | Email |
-|---|---|
-| System Administrator | `admin@skmms.test` |
-| SK Official | `sk1@demo.test` (trial), `sk2@demo.test` (Basic), `sk4@demo.test` (Free, at limit) |
-| Youth | `youth1@demo.test`, `youth2@demo.test`, `youth3@demo.test` |
+Production bundle:
 
-Youth can also self-register from the login screen.
+```bat
+npm run build
+```
 
-## Three QR purposes, kept separate
+## SK Official sign-in
 
-| | Purpose | Scanned by |
+| Email | Password | Org / plan |
 |---|---|---|
-| Registration QR | Youth account sign-up | the youth |
-| Program QR (`YSPROG-12`) | Register for one activity | the youth |
-| Youth Personal QR (`YSYOUTH-YTH-001`) | Identification and attendance | the SK |
+| `sk1@demo.test` | `YouthSync1!` | SK Ibaba del Norte, Paete — premium trial (**demo account**) |
+| `sk2@demo.test` | `YouthSync1!` | Basic |
+| `sk4@demo.test` | `YouthSync1!` | Free / youth-limit demo |
 
-A personal QR exists only once a youth has an active account.
+Local development only. If `api/.env` has `DEMO_MODE=true`, `sk1@demo.test` also accepts any non-empty password.
 
-## Youth record vs youth account
+Youth (`youth1@demo.test`) and admin (`admin@skmms.test`) logins remain **mock** (any password) and do not hit the PHP API.
 
-A record encoded by the SK has a permanent Youth ID and an account status of
-**Not registered** — no login, no personal QR. Ticking *Create a youth account* on the
-Add Youth form issues a temporary password (`YTS-482916` format) against the same Youth ID.
-The youth must set their own password at first sign-in.
+## Not implemented (do not demo as complete)
 
-## Registration is not attendance
+- Real SMS (Semaphore) or email (Brevo)
+- Payment gateway / checkout
+- File storage for photos and requirement documents
+- Youth Portal backend
+- System Administrator backend
+- Scheduled jobs
+- Production HTTPS / domain
 
-Registering puts a youth on the participant list. They remain **Not yet attended** until the
-SK selects the activity and scans their personal QR, or confirms them through manual
-attendance. Duplicate scans and unregistered youth are both refused.
-
-## Plan limits
-
-| | Free | Basic | Premium |
-|---|---|---|---|
-| Youth | 20 | 250 | Unlimited |
-| Users | 1 | 3 | Unlimited |
-| Programs | 1 | Unlimited | Unlimited |
-| Assistance | 1 | 20 | Unlimited |
-| QR scans | 1 | 3 | Unlimited |
-
-Limits block the action itself, not just the button. `sk4@demo.test` starts at the Free
-youth limit — opening `/sk/youth/new` directly is refused.
+Outbox and Activity logs in the SK UI are empty or simulated when using the live API.
 
 ## Project structure
 
-- `src/data/mock.js` — seed records, plans, statuses, QR formats, priority scoring
-- `src/stores/mock.jsx` — all state transitions in one place; replace bodies with API calls
-- `src/lib/storage.js` — persistence (bump `VERSION` to discard saved state)
-- `src/lib/validation.js` — form rules
-- `src/components/` — shared UI: layouts, ui primitives, filters, tags, education, qr, upload
-
-## Not implemented
-
-No SMS or email is sent; both outboxes hold frontend records ready for backend delivery.
-No payment processing — billing shows frontend state only. The camera scanner requires
-localhost or HTTPS; manual attendance covers every other case.
-
-## Role	Account	Password
-System Administrator	admin@skmms.test	Any password
-SK Official – Trial	sk1@demo.test	Any password
-SK Official – Basic	sk2@demo.test	Any password
-SK Official – Free / at limit	sk4@demo.test	Any password
-Youth – Jona	youth1@demo.test	Any password
-Youth – Maria	youth2@demo.test	Any password
-Youth – Carlo	youth3@demo.test	Any password
+- `src/stores/api.jsx` — SK Official API store
+- `src/stores/mock.jsx` — Youth / Admin / fallback mock
+- `src/lib/api.js` — `fetch` + `VITE_API_BASE_URL`
+- `src/data/mock.js` — labels, plan catalog copy, QR format helpers

@@ -1,6 +1,16 @@
 # YouthSync SK Official — Backend Implementation Plan
 
-**Status:** inspection only. No frontend files were modified. No PHP/MySQL backend has been created.
+**Status (Phase 12):** The SK Official PHP/MySQL API exists under `api/` and the React SK screens use it when an SK session is present. This document was the original Phase 0 plan; some early statements (no backend yet, frontend 100% mock) are **historical**.
+
+**How to run the project today:** repository root `README.md` (XAMPP, seed, demo accounts, limitations).
+
+**Still out of scope (future work):** System Administrator backend, Youth Portal backend, Semaphore SMS, Brevo email, payment gateway, cron jobs, cloud/file storage.
+
+---
+
+**Original Phase 0 text follows (inspection notes from before the API was built).**
+
+---
 
 **Scope of this plan:** SK Official / SK User backend only. System Administrator, Admin Dashboard, Super Admin, admin approval of organizations, admin org/user management, Youth Portal APIs, youth self-registration, and youth-specific dashboards are **out of scope**. Those UIs stay in the React app but will not receive SK-owned APIs from this workstream.
 
