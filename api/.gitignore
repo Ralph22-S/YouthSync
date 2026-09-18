@@ -1,0 +1,7 @@
+.env
+/logs/*.log
+/uploads/*
+/storage/remember_tokens.json
+!uploads/.gitkeep
+!logs/.gitkeep
+!storage/.gitkeep

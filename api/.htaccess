@@ -1,0 +1,6 @@
+RewriteEngine On
+RewriteBase /YouthSync_UI_Refresh/api/
+
+# Hide the public/ directory from URLs: /api/auth/login → public/index.php
+RewriteCond %{REQUEST_URI} !/public/
+RewriteRule ^(.*)$ public/$1 [L]

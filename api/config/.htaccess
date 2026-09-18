@@ -1,0 +1,8 @@
+# Deny web access to environment and hidden files
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "\.(env|sql|md|log|gitignore)$">
+    Require all denied
+</FilesMatch>
