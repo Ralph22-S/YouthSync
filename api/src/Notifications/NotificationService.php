@@ -17,8 +17,10 @@ final class NotificationService
         'system',
     ];
 
-    public function __construct(private PDO $pdo)
-    {
+    public function __construct(
+        private PDO $pdo,
+        private ?SmsService $sms = null,
+    ) {
     }
 
     /**
@@ -354,5 +356,126 @@ final class NotificationService
         }
         $text = strtolower(trim((string) $value));
         return in_array($text, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    /**
+     * One SMS per organization + event + recipient. A second call does not send again.
+     *
+     * @return array<string, mixed>
+     */
+    public function deliverSmsOnce(
+        int $organizationId,
+        string $eventCode,
+        int $eventId,
+        string $phone,
+        string $message,
+        ?int $notificationId = null
+    ): array {
+        $normalized = SmsService::normalizePhone($phone);
+        if ($normalized === null || $eventId < 1 || trim($eventCode) === '') {
+            return [
+                'ok' => false,
+                'status' => 'skipped',
+                'error' => 'Recipient phone is missing or invalid.',
+                'duplicate' => false,
+            ];
+        }
+        if ($this->sms === null) {
+            return [
+                'ok' => false,
+                'status' => 'skipped',
+                'error' => 'SMS delivery is not enabled.',
+                'duplicate' => false,
+            ];
+        }
+
+        $existing = $this->findSmsDelivery($organizationId, $eventCode, $eventId, $normalized);
+        if ($existing !== null) {
+            return [
+                'ok' => ($existing['status'] ?? '') === 'sent',
+                'status' => (string) ($existing['status'] ?? 'failed'),
+                'error' => $existing['error_message'] ?? null,
+                'duplicate' => true,
+                'id' => (int) $existing['id'],
+            ];
+        }
+
+        try {
+            $this->pdo->prepare(
+                'INSERT INTO sms_deliveries (
+                    organization_id, notification_id, event_code, event_id, recipient, provider, status
+                 ) VALUES (
+                    :organization_id, :notification_id, :event_code, :event_id, :recipient, :provider, :status
+                 )'
+            )->execute([
+                'organization_id' => $organizationId,
+                'notification_id' => $notificationId,
+                'event_code' => $eventCode,
+                'event_id' => $eventId,
+                'recipient' => $normalized,
+                'provider' => 'semaphore',
+                'status' => 'pending',
+            ]);
+        } catch (\PDOException $e) {
+            $driverCode = (int) ($e->errorInfo[1] ?? 0);
+            if ($driverCode === 1062) {
+                $row = $this->findSmsDelivery($organizationId, $eventCode, $eventId, $normalized);
+                return [
+                    'ok' => ($row['status'] ?? '') === 'sent',
+                    'status' => (string) ($row['status'] ?? 'failed'),
+                    'duplicate' => true,
+                    'id' => (int) ($row['id'] ?? 0),
+                ];
+            }
+            return [
+                'ok' => false,
+                'status' => 'failed',
+                'error' => 'SMS delivery could not be recorded.',
+                'duplicate' => false,
+            ];
+        }
+
+        $id = (int) $this->pdo->lastInsertId();
+        $result = $this->sms->send($normalized, $message);
+        $sent = ($result['ok'] ?? false) === true;
+        $this->pdo->prepare(
+            'UPDATE sms_deliveries
+             SET status = :status, provider_reference = :ref, error_message = :error, sent_at = :sent_at
+             WHERE id = :id'
+        )->execute([
+            'status' => $sent ? 'sent' : 'failed',
+            'ref' => $result['providerReference'] ?? null,
+            'error' => $sent ? null : (string) ($result['error'] ?? 'SMS provider is unavailable.'),
+            'sent_at' => $sent ? date('Y-m-d H:i:s') : null,
+            'id' => $id,
+        ]);
+        return [
+            'ok' => $sent,
+            'status' => $sent ? 'sent' : 'failed',
+            'error' => $sent ? null : (string) ($result['error'] ?? 'SMS provider is unavailable.'),
+            'duplicate' => false,
+            'id' => $id,
+            'providerReference' => $result['providerReference'] ?? null,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function findSmsDelivery(int $organizationId, string $eventCode, int $eventId, string $recipient): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM sms_deliveries
+             WHERE organization_id = :org AND event_code = :code AND event_id = :eventId AND recipient = :recipient
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'org' => $organizationId,
+            'code' => $eventCode,
+            'eventId' => $eventId,
+            'recipient' => $recipient,
+        ]);
+        $row = $stmt->fetch();
+        return is_array($row) ? $row : null;
     }
 }

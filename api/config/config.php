@@ -66,4 +66,7 @@ return [
     'demo_mode' => youthsync_env_bool('DEMO_MODE', false)
         && strtolower(youthsync_env('APP_ENV', 'development')) !== 'production',
     'demo_login_email' => strtolower(youthsync_env('DEMO_LOGIN_EMAIL', 'sk1@demo.test')),
+    'semaphore_api_key' => youthsync_env('SEMAPHORE_API_KEY', ''),
+    'semaphore_sender_name' => youthsync_env('SEMAPHORE_SENDER_NAME', ''),
+    'semaphore_base_url' => youthsync_env('SEMAPHORE_BASE_URL', 'https://api.semaphore.co'),
 ];

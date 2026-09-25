@@ -370,3 +370,23 @@ CREATE TABLE IF NOT EXISTS notifications (
   CONSTRAINT fk_notifications_youth FOREIGN KEY (youth_id)
     REFERENCES youth (id) ON UPDATE CASCADE ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS sms_deliveries (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  organization_id INT UNSIGNED NOT NULL,
+  notification_id INT UNSIGNED NULL DEFAULT NULL,
+  event_code VARCHAR(64) NOT NULL,
+  event_id INT UNSIGNED NOT NULL,
+  recipient VARCHAR(20) NOT NULL,
+  provider VARCHAR(32) NOT NULL DEFAULT 'semaphore',
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  provider_reference VARCHAR(128) NULL DEFAULT NULL,
+  error_message VARCHAR(255) NULL DEFAULT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  sent_at DATETIME NULL DEFAULT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_sms_event_recipient (organization_id, event_code, event_id, recipient),
+  KEY idx_sms_status (status),
+  CONSTRAINT fk_sms_organization FOREIGN KEY (organization_id)
+    REFERENCES organizations (id) ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -168,6 +168,22 @@ final class ApplicationService
             'relatedEntityType' => 'application',
             'relatedEntityId' => $id,
         ]);
+        $this->notifications->deliverSmsOnce(
+            $organizationId,
+            'application.submitted',
+            $id,
+            (string) ($youth['contact'] ?? ''),
+            'Your application for "' . $program['name'] . '" was submitted.',
+            null
+        );
+        $this->notifications->deliverSmsOnce(
+            $organizationId,
+            'application.received',
+            $id,
+            $this->organizationContact($organizationId),
+            $youthName . ' applied for "' . $program['name'] . '".',
+            null
+        );
         return $this->get($organizationId, $id);
     }
 
@@ -563,5 +579,22 @@ final class ApplicationService
             'relatedEntityType' => 'application',
             'relatedEntityId' => $applicationId,
         ]);
+        $youth = $this->youthInOrg($organizationId, $youthId);
+        $this->notifications->deliverSmsOnce(
+            $organizationId,
+            'application.' . $status,
+            $applicationId,
+            is_array($youth) ? (string) ($youth['contact'] ?? '') : '',
+            $copy[$status][1],
+            null
+        );
+    }
+
+    private function organizationContact(int $organizationId): string
+    {
+        $stmt = $this->pdo->prepare('SELECT contact FROM organizations WHERE id = :id LIMIT 1');
+        $stmt->execute(['id' => $organizationId]);
+        $contact = $stmt->fetchColumn();
+        return is_string($contact) ? $contact : '';
     }
 }
