@@ -207,12 +207,18 @@ npm run build
 
 ---
 
+## Notification providers
+
+In-app notifications are always written by the SK API.
+
+- **Semaphore SMS** is optional. Set `SEMAPHORE_API_KEY` and `SEMAPHORE_SENDER_NAME` in `api/.env`. Empty keys skip live sending; application requests still succeed.
+- **Resend email** is optional. Set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in `api/.env`. Empty keys skip live sending; application requests still succeed.
+- Automated HTTP tests use fake HTTP transports and do not contact Semaphore or Resend.
+
 ## Current limitations (not implemented)
 
 Do not present these as finished product features:
 
-- Semaphore SMS  
-- Brevo (or any) email delivery  
 - Payment gateway, checkout, payment verification, webhooks  
 - Automated cron / scheduled reminders  
 - File / cloud storage for photos and requirement documents  

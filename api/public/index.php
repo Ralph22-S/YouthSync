@@ -16,6 +16,7 @@ use YouthSync\Controllers\SubscriptionController;
 use YouthSync\Controllers\UserController;
 use YouthSync\Controllers\YouthController;
 use YouthSync\Infra\SchemaPatches;
+use YouthSync\Notifications\EmailService;
 use YouthSync\Notifications\NotificationService;
 use YouthSync\Notifications\SmsService;
 use YouthSync\Subscription\SubscriptionService;
@@ -137,11 +138,20 @@ $programController = new ProgramController($guard, new ProgramService($pdo));
 $attendanceController = new AttendanceController($guard, new AttendanceService($pdo));
 $assistanceService = new AssistanceService($pdo);
 $assistanceController = new AssistanceController($guard, $assistanceService);
-$notificationService = new NotificationService($pdo, new SmsService(
-    (string) ($config['semaphore_api_key'] ?? ''),
-    (string) ($config['semaphore_sender_name'] ?? ''),
-    (string) ($config['semaphore_base_url'] ?? 'https://api.semaphore.co')
-));
+$notificationService = new NotificationService(
+    $pdo,
+    new SmsService(
+        (string) ($config['semaphore_api_key'] ?? ''),
+        (string) ($config['semaphore_sender_name'] ?? ''),
+        (string) ($config['semaphore_base_url'] ?? 'https://api.semaphore.co')
+    ),
+    new EmailService(
+        (string) ($config['resend_api_key'] ?? ''),
+        (string) ($config['resend_from_email'] ?? ''),
+        (string) ($config['resend_from_name'] ?? 'YouthSync'),
+        (string) ($config['resend_base_url'] ?? 'https://api.resend.com')
+    )
+);
 $notificationController = new NotificationController($guard, $notificationService);
 $dashboardController = new DashboardController($guard, new DashboardService($pdo));
 $subscriptionController = new SubscriptionController($guard, new SubscriptionService($pdo));

@@ -39,6 +39,30 @@ final class SchemaPatches
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
             );
         }
+
+        if (!self::tableExists($pdo, 'email_deliveries')) {
+            $pdo->exec(
+                'CREATE TABLE email_deliveries (
+                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    organization_id INT UNSIGNED NOT NULL,
+                    notification_id INT UNSIGNED NULL DEFAULT NULL,
+                    event_code VARCHAR(64) NOT NULL,
+                    event_id INT UNSIGNED NOT NULL,
+                    recipient_email VARCHAR(190) NOT NULL,
+                    provider VARCHAR(32) NOT NULL DEFAULT \'resend\',
+                    status VARCHAR(16) NOT NULL DEFAULT \'pending\',
+                    provider_reference VARCHAR(128) NULL DEFAULT NULL,
+                    error_message VARCHAR(255) NULL DEFAULT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    sent_at DATETIME NULL DEFAULT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_email_event_recipient (organization_id, event_code, event_id, recipient_email),
+                    KEY idx_email_status (status),
+                    CONSTRAINT fk_email_organization FOREIGN KEY (organization_id)
+                        REFERENCES organizations (id) ON UPDATE CASCADE ON DELETE RESTRICT
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+            );
+        }
     }
 
     private static function tableExists(PDO $pdo, string $table): bool

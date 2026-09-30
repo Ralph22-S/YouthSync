@@ -6,7 +6,9 @@ SK Official cookie session. Demo login (local only): `sk1@demo.test` / `YouthSyn
 
 Team setup: repository root `README.md`. Endpoint details below cover auth plus SK youth, programs, attendance/QR, assistance, applications, notifications, dashboard, reports, subscription, and users.
 
-**Out of scope here:** Semaphore SMS, Brevo email, payment gateways, cron, file uploads, Youth Portal APIs, System Administrator APIs.
+**Out of scope here:** payment gateways, cron, file uploads, Youth Portal APIs, System Administrator APIs.
+
+Optional notification providers (not HTTP endpoints): Semaphore SMS (`SEMAPHORE_*`) and Resend email (`RESEND_*`). Both are configuration-dependent. Empty keys skip sending without failing the request. Automated tests use fake transports and never contact the live APIs.
 
 All responses are JSON (`Content-Type: application/json`).
 
@@ -528,7 +530,7 @@ C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\applications_h
 
 # Phase 7 — Notifications (SK Official)
 
-Organization-scoped in-app inbox for the authenticated SK Official. SMS, email, push, outbox, and activity logs are not implemented.
+Organization-scoped in-app inbox for the authenticated SK Official. Optional Semaphore SMS and Resend email follow the same application events when configured. Push, outbox, and activity logs are not implemented.
 
 SK list returns rows for the session organization where `youth_id` is null (SK inbox) and `user_id` is null (org-wide) or equal to the authenticated user. Youth-targeted rows are stored for application review events but are not listed on `/sk/notifications`.
 

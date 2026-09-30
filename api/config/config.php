@@ -69,4 +69,8 @@ return [
     'semaphore_api_key' => youthsync_env('SEMAPHORE_API_KEY', ''),
     'semaphore_sender_name' => youthsync_env('SEMAPHORE_SENDER_NAME', ''),
     'semaphore_base_url' => youthsync_env('SEMAPHORE_BASE_URL', 'https://api.semaphore.co'),
+    'resend_api_key' => youthsync_env('RESEND_API_KEY', ''),
+    'resend_from_email' => youthsync_env('RESEND_FROM_EMAIL', ''),
+    'resend_from_name' => youthsync_env('RESEND_FROM_NAME', 'YouthSync'),
+    'resend_base_url' => youthsync_env('RESEND_BASE_URL', 'https://api.resend.com'),
 ];

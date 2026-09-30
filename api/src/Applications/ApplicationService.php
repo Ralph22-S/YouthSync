@@ -159,7 +159,7 @@ final class ApplicationService
         $id = (int) $this->pdo->lastInsertId();
         $this->seedSubmissions($organizationId, $id, $values['assistanceId'], $values['submissions']);
         $youthName = trim(($youth['first_name'] ?? '') . ' ' . ($youth['last_name'] ?? ''));
-        $this->notifications->notifySk($organizationId, [
+        $skNote = $this->notifications->notifySk($organizationId, [
             'type' => 'applications',
             'title' => 'New application received',
             'message' => $youthName . ' applied for "' . $program['name'] . '".',
@@ -183,6 +183,26 @@ final class ApplicationService
             $this->organizationContact($organizationId),
             $youthName . ' applied for "' . $program['name'] . '".',
             null
+        );
+        $this->notifications->deliverEmailOnce(
+            $organizationId,
+            'application.submitted',
+            $id,
+            (string) ($youth['email'] ?? ''),
+            'Application submitted',
+            'Your application for "' . $program['name'] . '" was submitted.',
+            (string) $program['name'],
+            null
+        );
+        $this->notifications->deliverEmailOnce(
+            $organizationId,
+            'application.received',
+            $id,
+            $this->organizationEmail($organizationId),
+            'New application received',
+            $youthName . ' applied for "' . $program['name'] . '".',
+            (string) $program['name'],
+            isset($skNote['id']) ? (int) $skNote['id'] : null
         );
         return $this->get($organizationId, $id);
     }
@@ -570,7 +590,7 @@ final class ApplicationService
                 'Some requirements for ' . $name . ' need to be replaced.',
             ],
         ];
-        $this->notifications->notifyYouth($organizationId, $youthId, [
+        $youthNote = $this->notifications->notifyYouth($organizationId, $youthId, [
             'type' => 'applications',
             'title' => $copy[$status][0],
             'message' => $copy[$status][1],
@@ -588,6 +608,16 @@ final class ApplicationService
             $copy[$status][1],
             null
         );
+        $this->notifications->deliverEmailOnce(
+            $organizationId,
+            'application.' . $status,
+            $applicationId,
+            is_array($youth) ? (string) ($youth['email'] ?? '') : '',
+            $copy[$status][0],
+            $copy[$status][1],
+            $name,
+            isset($youthNote['id']) ? (int) $youthNote['id'] : null
+        );
     }
 
     private function organizationContact(int $organizationId): string
@@ -596,5 +626,13 @@ final class ApplicationService
         $stmt->execute(['id' => $organizationId]);
         $contact = $stmt->fetchColumn();
         return is_string($contact) ? $contact : '';
+    }
+
+    private function organizationEmail(int $organizationId): string
+    {
+        $stmt = $this->pdo->prepare('SELECT email FROM organizations WHERE id = :id LIMIT 1');
+        $stmt->execute(['id' => $organizationId]);
+        $email = $stmt->fetchColumn();
+        return is_string($email) ? $email : '';
     }
 }

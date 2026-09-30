@@ -236,7 +236,7 @@ C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\import_notific
 C:\xampp\php\php.exe C:\xampp\htdocs\YouthSync_UI_Refresh\api\sql\notifications_http_test.php
 ```
 
-SK Official in-app inbox only. SMS, email, push, and outbox are not implemented. Organization and recipient always come from the session/server; client `organization_id` / `user_id` / `created_by` are ignored.
+SK Official in-app inbox. Optional Semaphore SMS and Resend email run from `NotificationService` when those providers are configured in `api/.env`. Leave the keys empty to disable sending; in-app notices still work. Automated tests use fake transports and do not send real SMS or email. Push, outbox UI, and a frontend email editor are not implemented. Organization and recipient always come from the session/server; client `organization_id` / `user_id` / `created_by` are ignored.
 
 ---
 

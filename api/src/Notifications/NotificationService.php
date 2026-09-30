@@ -20,6 +20,7 @@ final class NotificationService
     public function __construct(
         private PDO $pdo,
         private ?SmsService $sms = null,
+        private ?EmailService $email = null,
     ) {
     }
 
@@ -474,6 +475,135 @@ final class NotificationService
             'code' => $eventCode,
             'eventId' => $eventId,
             'recipient' => $recipient,
+        ]);
+        $row = $stmt->fetch();
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * One email per organization + event + recipient. A second call does not send again.
+     *
+     * @return array<string, mixed>
+     */
+    public function deliverEmailOnce(
+        int $organizationId,
+        string $eventCode,
+        int $eventId,
+        string $recipientEmail,
+        string $title,
+        string $message,
+        string $related = '',
+        ?int $notificationId = null
+    ): array {
+        $normalized = EmailService::normalizeEmail($recipientEmail);
+        if ($normalized === null || $eventId < 1 || trim($eventCode) === '') {
+            return [
+                'ok' => false,
+                'status' => 'skipped',
+                'error' => 'Recipient email is missing or invalid.',
+                'duplicate' => false,
+            ];
+        }
+        if ($this->email === null || !$this->email->isConfigured()) {
+            return [
+                'ok' => false,
+                'status' => 'skipped',
+                'error' => 'Email delivery is not enabled.',
+                'duplicate' => false,
+            ];
+        }
+
+        $existing = $this->findEmailDelivery($organizationId, $eventCode, $eventId, $normalized);
+        if ($existing !== null) {
+            return [
+                'ok' => ($existing['status'] ?? '') === 'sent',
+                'status' => (string) ($existing['status'] ?? 'failed'),
+                'error' => $existing['error_message'] ?? null,
+                'duplicate' => true,
+                'id' => (int) $existing['id'],
+            ];
+        }
+
+        try {
+            $this->pdo->prepare(
+                'INSERT INTO email_deliveries (
+                    organization_id, notification_id, event_code, event_id, recipient_email, provider, status
+                 ) VALUES (
+                    :organization_id, :notification_id, :event_code, :event_id, :recipient_email, :provider, :status
+                 )'
+            )->execute([
+                'organization_id' => $organizationId,
+                'notification_id' => $notificationId,
+                'event_code' => $eventCode,
+                'event_id' => $eventId,
+                'recipient_email' => $normalized,
+                'provider' => 'resend',
+                'status' => 'pending',
+            ]);
+        } catch (\PDOException $e) {
+            $driverCode = (int) ($e->errorInfo[1] ?? 0);
+            if ($driverCode === 1062) {
+                $row = $this->findEmailDelivery($organizationId, $eventCode, $eventId, $normalized);
+                return [
+                    'ok' => ($row['status'] ?? '') === 'sent',
+                    'status' => (string) ($row['status'] ?? 'failed'),
+                    'duplicate' => true,
+                    'id' => (int) ($row['id'] ?? 0),
+                ];
+            }
+            return [
+                'ok' => false,
+                'status' => 'failed',
+                'error' => 'Email delivery could not be recorded.',
+                'duplicate' => false,
+            ];
+        }
+
+        $id = (int) $this->pdo->lastInsertId();
+        $composed = EmailService::compose($title, $message, $related);
+        $result = $this->email->send(
+            $normalized,
+            $composed['subject'],
+            $composed['html'],
+            $composed['text']
+        );
+        $sent = ($result['ok'] ?? false) === true;
+        $this->pdo->prepare(
+            'UPDATE email_deliveries
+             SET status = :status, provider_reference = :ref, error_message = :error, sent_at = :sent_at
+             WHERE id = :id'
+        )->execute([
+            'status' => $sent ? 'sent' : 'failed',
+            'ref' => $result['providerReference'] ?? null,
+            'error' => $sent ? null : (string) ($result['error'] ?? 'Email provider is unavailable.'),
+            'sent_at' => $sent ? date('Y-m-d H:i:s') : null,
+            'id' => $id,
+        ]);
+        return [
+            'ok' => $sent,
+            'status' => $sent ? 'sent' : 'failed',
+            'error' => $sent ? null : (string) ($result['error'] ?? 'Email provider is unavailable.'),
+            'duplicate' => false,
+            'id' => $id,
+            'providerReference' => $result['providerReference'] ?? null,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function findEmailDelivery(int $organizationId, string $eventCode, int $eventId, string $recipientEmail): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM email_deliveries
+             WHERE organization_id = :org AND event_code = :code AND event_id = :eventId AND recipient_email = :email
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'org' => $organizationId,
+            'code' => $eventCode,
+            'eventId' => $eventId,
+            'email' => $recipientEmail,
         ]);
         $row = $stmt->fetch();
         return is_array($row) ? $row : null;
