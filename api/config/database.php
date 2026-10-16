@@ -17,6 +17,13 @@ function youthsync_pdo(): PDO
     $user = youthsync_env('DB_USER', 'root');
     $pass = youthsync_env('DB_PASSWORD', '');
 
+    if (str_ends_with($host, '.railway.internal')) {
+        $ipv4 = gethostbynamel($host);
+        if (is_array($ipv4) && $ipv4 !== []) {
+            $host = $ipv4[0];
+        }
+    }
+
     $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', $host, $port, $name);
 
     $pdo = new PDO($dsn, $user, $pass, [
