@@ -165,7 +165,7 @@ try {
     $line = sprintf("[%s] DB connection failed: %s\n", date('c'), $e->getMessage());
     @file_put_contents($logFile, $line, FILE_APPEND);
     fwrite(STDERR, $line);
-    Json::error('SERVER_ERROR', 'The service is temporarily unavailable.', 500);
+    Json::error('SERVER_ERROR', 'Database connection failed. ' . $e->getMessage(), 500);
 }
 
 SchemaPatches::apply($pdo);
