@@ -162,7 +162,8 @@ if (!$isAnonymousMe && !$publicAuthPost && session_status() !== PHP_SESSION_ACTI
 try {
     $pdo = youthsync_pdo();
 } catch (PDOException $e) {
-    @file_put_contents($logFile, sprintf("[%s] DB connection failed\n", date('c')), FILE_APPEND);
+    @file_put_contents($logFile, sprintf("[%s] DB connection failed: %s\n", date('c'), $e->getMessage()), FILE_APPEND);
+    error_log('DB connection failed: ' . $e->getMessage());
     Json::error('SERVER_ERROR', 'The service is temporarily unavailable.', 500);
 }
 
