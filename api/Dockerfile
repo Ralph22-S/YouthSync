@@ -21,4 +21,5 @@ RUN sed -i 's|RewriteBase /YouthSync/api/public/|RewriteBase /|' /var/www/html/p
 COPY docker-entrypoint.sh /usr/local/bin/youthsync-entrypoint.sh
 RUN chmod +x /usr/local/bin/youthsync-entrypoint.sh
 
+EXPOSE 8080
 CMD ["youthsync-entrypoint.sh"]
