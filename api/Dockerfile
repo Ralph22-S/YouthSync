@@ -7,11 +7,11 @@ RUN set -eux; \
     && a2enmod rewrite \
     && rm -rf /var/lib/apt/lists/*
 
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-RUN sed -ri 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
-    && sed -ri 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf \
+RUN sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-available/000-default.conf \
     && printf '<Directory /var/www/html/public>\nAllowOverride All\nRequire all granted\n</Directory>\n' > /etc/apache2/conf-available/youthsync.conf \
-    && a2enconf youthsync
+    && a2enconf youthsync \
+    && a2dismod -f mpm_event mpm_worker || true \
+    && a2enmod mpm_prefork
 
 COPY . /var/www/html
 RUN sed -i 's|RewriteBase /YouthSync/api/public/|RewriteBase /|' /var/www/html/public/.htaccess \
