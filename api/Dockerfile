@@ -1,7 +1,8 @@
 FROM php:8.2-apache
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libcurl4-openssl-dev libzip-dev unzip \
+RUN set -eux; \
+    for i in 1 2 3 4 5; do apt-get update && break || sleep 8; done; \
+    apt-get install -y --no-install-recommends libcurl4-openssl-dev libzip-dev unzip \
     && docker-php-ext-install pdo_mysql curl mbstring zip \
     && a2enmod rewrite \
     && rm -rf /var/lib/apt/lists/*
