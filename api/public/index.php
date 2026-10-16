@@ -70,7 +70,7 @@ set_exception_handler(static function (Throwable $e) use ($logFile): void {
     $line = sprintf("[%s] %s in %s:%d\n", date('c'), $e->getMessage(), $e->getFile(), $e->getLine());
     @file_put_contents($logFile, $line, FILE_APPEND);
     if (!headers_sent()) {
-        Json::error('SERVER_ERROR', 'Something went wrong. Please try again later.', 500);
+        Json::error('SERVER_ERROR', $e->getMessage(), 500);
     }
 });
 
