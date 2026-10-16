@@ -30,7 +30,7 @@ final class ApplicationController
     public function store(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->applications->create($ctx['organization_id'], Json::readBody()), 201);
+        Json::success($this->applications->create($ctx['organization_id'], Json::readBody(), $ctx['user']), 201);
     }
 
     public function update(array $params): void
@@ -39,7 +39,8 @@ final class ApplicationController
         Json::success($this->applications->update(
             $ctx['organization_id'],
             (int) $params['id'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ));
     }
 
@@ -50,7 +51,8 @@ final class ApplicationController
             $ctx['organization_id'],
             (int) $params['id'],
             (int) $ctx['user']['id'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ));
     }
 
@@ -63,7 +65,8 @@ final class ApplicationController
             $ctx['organization_id'],
             (int) $params['id'],
             (int) $ctx['user']['id'],
-            $body
+            $body,
+            $ctx['user']
         ));
     }
 
@@ -79,8 +82,20 @@ final class ApplicationController
             $ctx['organization_id'],
             (int) $params['id'],
             (int) $ctx['user']['id'],
-            $body
+            $body,
+            $ctx['user']
         ));
+    }
+
+    public function requirementFile(array $params): void
+    {
+        $ctx = $this->guard->requireSkOfficial();
+        $this->applications->sendOrganizationRequirementFile(
+            $ctx['organization_id'],
+            (int) $params['id'],
+            (int) $params['requirementId'],
+            isset($_GET['download']) && (string) $_GET['download'] !== '' && (string) $_GET['download'] !== '0'
+        );
     }
 
     public function reviewRequirement(array $params): void
@@ -90,7 +105,8 @@ final class ApplicationController
             $ctx['organization_id'],
             (int) $params['id'],
             (int) $ctx['user']['id'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ));
     }
 }

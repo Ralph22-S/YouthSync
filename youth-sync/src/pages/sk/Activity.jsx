@@ -1,32 +1,94 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '../../store.jsx';
+import { api, friendlyApiMessage, totalPagesOf } from '../../lib/api.js';
 import { PageHeader } from '../../components/layouts.jsx';
-import { Empty, Field, Tabs } from '../../components/ui.jsx';
+import { Empty, Field, Pagination } from '../../components/ui.jsx';
+import { FilterBar } from '../../components/filters.jsx';
+import { formatDateTime } from '../../components/deliveries.jsx';
 
-const ACTIONS = {
-  all: 'All',
+const PAGE_SIZE = 25;
+
+/** Friendly names for categories stored in activity_logs. Unknown values are shown as stored. */
+const CATEGORY_LABELS = {
+  auth: 'Sign-in & security',
   application: 'Applications',
   requirement: 'Requirements',
   attendance: 'Attendance',
-  register: 'Registrations',
+  qr: 'QR scans',
   program: 'Programs & events',
+  assistance: 'Assistance',
   youth: 'Youth records',
   user: 'User accounts',
-  subscription: 'Subscription',
+  notification: 'Notifications',
+  organization: 'Organization',
+  general: 'General',
 };
 
-/** Append-only audit trail for the organization. Newest entry first. */
+const categoryLabel = (value) => CATEGORY_LABELS[value] || value;
+const roleLabel = (value) => String(value || 'system').replace(/_/g, ' ').toLowerCase();
+
+/**
+ * Append-only audit trail for the signed-in SK organization, newest first.
+ * Rows come from GET /sk/activity; the organization is taken from the session on the server.
+ */
 export default function ActivityLogs() {
-  const { scoped, allows, plan } = useStore();
-  const [filter, setFilter] = useState('all');
+  const { allows, plan } = useStore();
+  const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
+  const [action, setAction] = useState('');
+  const [category, setCategory] = useState('');
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const enabled = allows('activity_logs');
 
-  const all = scoped('activityLogs');
-  const rows = all
-    .filter((log) => (filter === 'all' ? true : log.action === filter))
-    .filter((log) => `${log.description} ${log.actor}`.toLowerCase().includes(query.toLowerCase()));
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setQuery(search.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
-  if (!allows('activity_logs')) {
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api.get('/sk/activity', {
+      query: {
+        page,
+        perPage: PAGE_SIZE,
+        q: query || undefined,
+        action: action || undefined,
+        category: category || undefined,
+      },
+    })
+      .then((result) => {
+        if (cancelled) return;
+        // The API returns an empty page past the end; if rows were removed
+        // meanwhile, step back to the last real page instead of showing it.
+        const last = totalPagesOf(result);
+        if (page > last) {
+          setPage(last);
+          return;
+        }
+        setData(result || { items: [], total: 0 });
+      })
+      .catch((err) => {
+        if (!cancelled && err?.name !== 'AbortError') {
+          setError(friendlyApiMessage(err, 'Unable to load activity logs.'));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [enabled, page, query, action, category, reloadKey]);
+
+  if (!enabled) {
     return (
       <>
         <PageHeader title="Activity logs" />
@@ -36,34 +98,85 @@ export default function ActivityLogs() {
     );
   }
 
+  const rows = Array.isArray(data?.items) ? data.items : [];
+  const total = Number(data?.total) || 0;
+  const actions = Array.isArray(data?.filters?.actions) ? data.filters.actions : [];
+  const categories = Array.isArray(data?.filters?.categories) ? data.filters.categories : [];
+  const filtered = Boolean(query || action || category);
+  const reset = () => {
+    setSearch('');
+    setQuery('');
+    setAction('');
+    setCategory('');
+    setPage(1);
+  };
+  const pick = (setter) => (e) => {
+    setter(e.target.value);
+    setPage(1);
+  };
+
   return (
     <>
-      <PageHeader title="Activity logs" subtitle={`${all.length} entry(s) recorded for this organization`} />
+      <PageHeader
+        title="Activity logs"
+        subtitle={data ? `${total.toLocaleString()} entr${total === 1 ? 'y' : 'ies'}${filtered ? ' match these filters' : ' recorded for this organization'}` : 'Audit trail recorded by the server'}
+        actions={(
+          <button type="button" className="btn btn-ghost" disabled={loading} onClick={() => setReloadKey((k) => k + 1)}>
+            {loading ? 'Loading...' : 'Refresh'}
+          </button>
+        )}
+      />
 
-      <Tabs active={filter} onSelect={setFilter} items={Object.entries(ACTIONS)
-        .map(([key, label]) => ({ key, label, count: key === 'all' ? all.length : all.filter((l) => l.action === key).length }))
-        .filter((tab) => tab.key === 'all' || tab.count > 0)} />
+      <FilterBar search={search} onSearch={setSearch} placeholder="Description or person" onReset={filtered ? reset : undefined}>
+        <Field label="Category">
+          <select className="field" value={category} onChange={pick(setCategory)}>
+            <option value="">All categories</option>
+            {categories.map((value) => <option key={value} value={value}>{categoryLabel(value)}</option>)}
+            {category && !categories.includes(category) && <option value={category}>{categoryLabel(category)}</option>}
+          </select>
+        </Field>
+        <Field label="Action">
+          <select className="field" value={action} onChange={pick(setAction)}>
+            <option value="">All actions</option>
+            {actions.map((value) => <option key={value} value={value}>{value}</option>)}
+            {action && !actions.includes(action) && <option value={action}>{action}</option>}
+          </select>
+        </Field>
+      </FilterBar>
 
-      <div className="card mb-4 p-4">
-        <Field label="Search"><input className="field" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Description or person" /></Field>
-      </div>
-
-      {rows.length === 0 ? (
-        <Empty title="Nothing logged yet" body="Approvals, attendance, registrations and record changes are written here as they happen." />
-      ) : (
-        <div className="card divide-y divide-line">
-          {rows.map((log) => (
-            <div key={log.id} className="flex flex-wrap items-start justify-between gap-3 p-4">
-              <div className="min-w-0">
-                <p className="text-sm text-navy-900">{log.description}</p>
-                <p className="mt-0.5 text-xs text-[#8391A4]">
-                  {log.actor} · {log.role.replace(/_/g, ' ')} · {log.at}
-                </p>
-              </div>
-              <span className="badge bg-shell text-[#4A5B70]">{ACTIONS[log.action] || log.action}</span>
-            </div>
-          ))}
+      {error ? (
+        <div className="card border-[#F0D3D1] bg-[#FCF3F2] px-6 py-8 text-center">
+          <p className="text-sm font-semibold text-[#96201A]">{error}</p>
+          <button type="button" className="btn btn-ghost mt-4" onClick={() => setReloadKey((k) => k + 1)}>Retry</button>
         </div>
+      ) : loading && !data ? (
+        <Empty title="Loading activity..." body="Fetching the organization audit trail from the server." />
+      ) : rows.length === 0 ? (
+        filtered
+          ? <Empty title="No activity matches these filters." body="Clear the search or filters to see every entry." />
+          : <Empty title="Nothing logged yet" body="Sign-ins, approvals, attendance, registrations and record changes are written here as they happen." />
+      ) : (
+        <>
+          {loading && <p className="mb-2 text-sm text-ink-muted">Loading activity...</p>}
+          <div className="card divide-y divide-line">
+            {rows.map((log) => (
+              <div key={log.id} className="flex flex-wrap items-start justify-between gap-3 p-4">
+                <div className="min-w-0">
+                  <p className="text-sm text-navy-900">{log.description}</p>
+                  <p className="mt-0.5 text-xs text-[#8391A4]">
+                    {log.actor || log.user || 'System'} · {roleLabel(log.actorRole || log.role)} · {formatDateTime(log.createdAt || log.at) || 'time not recorded'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="badge bg-shell text-[#4A5B70]">{categoryLabel(log.category || 'general')}</span>
+                  <span className="badge bg-white text-[#4A5B70] ring-1 ring-line">{log.action}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <Pagination page={page} pageSize={PAGE_SIZE} total={total} totalPages={totalPagesOf(data)}
+            onPage={setPage} loading={loading} noun="entries" />
+        </>
       )}
     </>
   );

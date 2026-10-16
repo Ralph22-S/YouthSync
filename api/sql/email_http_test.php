@@ -80,16 +80,16 @@ $check = static function (string $name, bool $ok) use (&$failed): void {
 
 $check(
     'config_keys',
-    isset($config['resend_api_key'], $config['resend_from_email'], $config['resend_from_name'], $config['resend_base_url'])
+    isset($config['brevo_api_key'], $config['brevo_from_email'], $config['brevo_from_name'], $config['brevo_base_url'])
 );
 $check(
     'config_base_default',
-    $config['resend_base_url'] === '' || str_starts_with((string) $config['resend_base_url'], 'https://')
+    $config['brevo_base_url'] === '' || str_starts_with((string) $config['brevo_base_url'], 'https://')
 );
-$check('config_key_is_string', is_string($config['resend_api_key']));
-$check('config_from_name_default', (string) $config['resend_from_name'] === 'YouthSync' || (string) $config['resend_from_name'] !== '');
+$check('config_key_is_string', is_string($config['brevo_api_key']));
+$check('config_from_name_default', (string) $config['brevo_from_name'] === 'YouthSync' || (string) $config['brevo_from_name'] !== '');
 
-$missing = new EmailService('', 'noreply@example.test', 'YouthSync', 'https://api.resend.com');
+$missing = new EmailService('', 'noreply@example.test', 'YouthSync', 'https://api.brevo.com');
 $missingResult = $missing->send('youth@example.test', 'Hello', '<p>Hi</p>', 'Hi');
 $check(
     'missing_api_key',
@@ -163,6 +163,13 @@ $notes = new NotificationService(
     $pdo,
     new SmsService('sms-secret', 'YOUTHSYNC', 'https://api.semaphore.co', $smsFake),
     new EmailService('re_secret', 'noreply@example.test', 'YouthSync', 'https://api.resend.com', $fake)
+$fake->body = '{"messageId":"<email-9@smtp.brevo.com>"}';
+
+$eventId = 880001;
+$pdo->prepare('DELETE FROM email_deliveries WHERE organization_id IN (1, 2) AND event_id = :id')->execute(['id' => $eventId]);
+$pdo->prepare('DELETE FROM sms_deliveries WHERE organization_id IN (1, 2) AND event_id = :id')->execute(['id' => $eventId]);
+
+    new EmailService('re_secret', 'noreply@example.test', 'YouthSync', 'https://api.brevo.com', $fake)
 );
 
 $eventId = 880001;
@@ -172,14 +179,7 @@ $pdo->prepare('DELETE FROM sms_deliveries WHERE organization_id IN (1, 2) AND ev
 $unconfigured = new NotificationService(
     $pdo,
     new SmsService('sms-secret', 'YOUTHSYNC', 'https://api.semaphore.co', $smsFake),
-    new EmailService('', 'noreply@example.test', 'YouthSync', 'https://api.resend.com', $fake)
-);
-$skipCfg = $unconfigured->deliverEmailOnce(1, 'application.submitted', $eventId, 'youth@example.test', 'Title', 'Message');
-$skipStmt = $pdo->prepare(
-    'SELECT COUNT(*) FROM email_deliveries WHERE organization_id = 1 AND event_code = :code AND event_id = :id'
-);
-$skipStmt->execute(['code' => 'application.submitted', 'id' => $eventId]);
-$check(
+    new EmailService('', 'noreply@example.test', 'YouthSync', 'https://api.brevo.com', $fake)
     'unconfigured_skips_without_row',
     ($skipCfg['status'] ?? '') === 'skipped' && (int) $skipStmt->fetchColumn() === 0
 );

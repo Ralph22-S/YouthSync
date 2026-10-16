@@ -1,5 +1,3 @@
-import { planByCode } from '../data/mock.js';
-
 export const emptyDb = () => ({
   youth: [],
   programs: [],
@@ -12,10 +10,33 @@ export const emptyDb = () => ({
   notifications: [],
   emails: [],
   sms: [],
-  activity: [],
-  activityLogs: [],
   payments: [],
 });
+
+export const mapYouthSession = (snapshot) => {
+  const account = snapshot?.user || {};
+  const youth = snapshot?.youth || {};
+  const first = youth.firstName || account.first_name || account.firstName || '';
+  const last = youth.lastName || account.last_name || account.lastName || '';
+  const organization = snapshot?.organization || null;
+  return {
+    user: {
+      id: account.id,
+      email: account.email,
+      firstName: first,
+      lastName: last,
+      name: `${first} ${last}`.trim() || account.email,
+      role: 'youth',
+      youthId: youth.id ?? null,
+      orgId: organization?.id ?? youth.organizationId ?? null,
+      active: (account.status || 'active') === 'active',
+      mustChangePassword: Boolean(account.must_change_password ?? account.mustChangePassword),
+      lastLogin: account.last_login_at ?? account.lastLoginAt ?? 'Never',
+    },
+    org: organization,
+    youthRecord: youth.id ? youth : null,
+  };
+};
 
 export const mapAuthUser = (snapshot) => {
   const user = snapshot?.user || {};
@@ -52,12 +73,39 @@ export const mapOrganization = (org, subscription) => {
     status: org.status,
     plan,
     subStatus: status,
+    subStatusLabel: subscription?.statusLabel || null,
     cycle: subscription?.cycle || sub.cycle || 'none',
+    startedOn: subscription?.startedOn ?? null,
     expiresAt: subscription?.expiresAt || sub.expires_at || null,
     expiresIn: subscription?.expiresIn ?? null,
+    // Days left in a running trial/active term (null when free, expired or cancelled).
+    daysRemaining: subscription?.daysRemaining ?? null,
+    restrictedToFree: Boolean(subscription?.restrictedToFree),
     qrUses: subscription?.usage?.qr ?? 0,
   };
 };
+
+/**
+ * Plan catalog from the API (GET /sk/subscription `plans`, GET /admin/plans
+ * `items`). Prices are reference list prices for display only.
+ */
+export const mapPlanCatalog = (rows) => (Array.isArray(rows) ? rows : []).map((row, index) => ({
+  id: index + 1,
+  code: row.code,
+  name: row.name,
+  tagline: row.tagline || '',
+  currency: row.currency || 'PHP',
+  priceMonthly: Number(row.priceMonthly ?? 0),
+  priceYearly: Number(row.priceYearly ?? 0),
+  popular: Boolean(row.popular),
+  limits: row.limits || {},
+  features: {
+    csv_import: Boolean(row.features?.csvImport),
+    excel_export: Boolean(row.features?.excelExport),
+    activity_logs: Boolean(row.features?.activityLogs),
+  },
+  bullets: Array.isArray(row.bullets) ? row.bullets : [],
+}));
 
 export const mapYouth = (row, orgId) => ({
   ...row,
@@ -76,7 +124,8 @@ export const mapProgram = (row, orgId) => ({
   tagInterests: row.tagInterests || [],
   tagSkills: row.tagSkills || [],
   tagActivities: row.tagActivities || [],
-  qrCode: row.qrCode || `YSPROG-${row.id}`,
+  registrationCode: row.registrationCode || '',
+  qrCode: row.registrationCode || row.qrCode || '',
 });
 
 export const mapAssistance = (row, orgId) => ({
@@ -91,9 +140,10 @@ export const mapApplication = (row, orgId) => ({
   id: row.id,
   orgId,
   youthId: row.youthId,
-  targetType: 'assistance',
-  targetId: row.assistanceId ?? row.targetId,
-  assistanceId: row.assistanceId,
+  targetType: row.targetType || (row.programId ? 'program' : 'assistance'),
+  targetId: row.targetId || row.programId || row.assistanceId,
+  assistanceId: row.assistanceId || null,
+  programId: row.programId || null,
   status: row.status,
   remarks: row.remarks || '',
   submittedAt: row.submittedAt,
@@ -131,28 +181,102 @@ export const mapSkUser = (row, orgId) => ({
   active: (row.status || 'active') === 'active',
   status: row.status,
   isOwner: Boolean(row.isOwner),
+  // The SK screens (Users, Settings staff list) read `owner`, as the admin team list does.
+  owner: Boolean(row.isOwner),
   mustChangePassword: Boolean(row.mustChangePassword),
   lastLogin: row.lastLoginAt || 'Never',
   createdAt: row.createdAt || '',
 });
 
 export const mapAttendanceToRegistration = (row, orgId) => {
-  const status = row.status === 'pending' ? 'registered' : 'registered';
-  const attendance = ['present', 'absent', 'excused'].includes(row.status) ? row.status : '';
+  const raw = String(row.status || '').toLowerCase();
+  const source = String(row.source || '').toLowerCase();
+  const attendance = ['present', 'absent', 'excused'].includes(raw)
+    ? raw
+    : (source === 'self' ? 'present' : '');
   return {
     id: row.id,
     orgId,
     programId: row.programId,
     youthId: row.youthId,
-    status,
+    status: ['invited', 'declined'].includes(raw) ? raw : 'registered',
     attendance,
     scannedAt: row.confirmedAt || row.scannedAt || row.createdAt || '',
-    source: row.source,
-    pending: row.status === 'pending',
+    source,
+    pending: raw === 'pending' && source !== 'self',
   };
 };
 
-export const catalogPlan = (code) => planByCode(String(code || 'free').toLowerCase());
+export const mapYouthProgram = (row, orgId) => ({
+  id: row.id,
+  orgId,
+  kind: row.kind || 'program',
+  name: row.name,
+  category: row.category || '',
+  status: row.status,
+  scheduledOn: row.scheduledOn,
+  startsAt: row.startsAt,
+  endsAt: row.endsAt,
+  location: row.location || '',
+  description: row.description || '',
+  maxParticipants: row.maxParticipants,
+  registeredCount: Number(row.registeredCount) || 0,
+  registrationDeadline: row.registrationDeadline,
+  tagInterests: row.tagInterests || [],
+  tagSkills: row.tagSkills || [],
+  tagActivities: row.tagActivities || [],
+  requiresStudying: Boolean(row.requiresStudying),
+  minAge: row.minAge,
+  maxAge: row.maxAge,
+  requirementItems: row.requirementItems || [],
+});
+
+export const mapYouthAssistance = (row, orgId) => ({
+  id: row.id,
+  orgId,
+  name: row.name,
+  category: row.category || '',
+  status: row.status,
+  slots: row.slots,
+  amount: row.amount,
+  description: row.description || '',
+  deadline: row.deadline,
+  requirements: row.requirements || '',
+  requirementItems: row.requirementItems || [],
+  tagInterests: row.tagInterests || [],
+  tagSkills: row.tagSkills || [],
+  tagActivities: row.tagActivities || [],
+  requiresStudying: Boolean(row.requiresStudying),
+  minAge: row.minAge,
+  maxAge: row.maxAge,
+});
+
+export const mapYouthApplication = (row, orgId) => ({
+  id: row.id,
+  orgId,
+  youthId: row.youthId,
+  targetType: row.targetType || (row.programId ? 'program' : 'assistance'),
+  targetId: row.targetId || row.programId || row.assistanceId,
+  assistanceId: row.assistanceId || null,
+  programId: row.programId || null,
+  status: row.status,
+  submittedAt: String(row.submittedAt || '').slice(0, 10),
+  reviewedAt: row.reviewedAt ? String(row.reviewedAt).slice(0, 10) : null,
+  remarks: row.remarks || '',
+  assistanceName: row.assistance?.name || row.program?.name || '',
+});
+
+export const mapYouthNotification = (row, orgId) => ({
+  id: row.id,
+  orgId,
+  youthId: row.youthId,
+  title: row.title,
+  body: row.body || row.message || '',
+  read: Boolean(row.isRead ?? row.read),
+  createdAt: row.createdAt,
+  link: row.link && String(row.link).startsWith('/youth') ? row.link : '',
+  category: row.type || row.category || 'system',
+});
 
 export const itemsOf = (payload) => {
   if (!payload) return [];

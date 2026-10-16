@@ -5,6 +5,8 @@ namespace YouthSync\Auth;
 
 final class Password
 {
+    public const RULE = 'Use at least 8 characters, with 1 capital letter and 1 lowercase letter.';
+
     public static function hash(string $plain): string
     {
         return password_hash($plain, PASSWORD_DEFAULT);

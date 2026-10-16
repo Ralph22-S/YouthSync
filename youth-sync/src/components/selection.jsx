@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useStore } from '../store.jsx';
+import { useStore, useStoreData } from '../store.jsx';
 import { Badge, Field, Section } from './ui.jsx';
 import { age, fullName } from '../data/mock.js';
 
@@ -9,24 +9,31 @@ import { age, fullName } from '../data/mock.js';
  * simulated email are only created by the Confirm step, and only for the youth
  * actually selected.
  */
-export default function SelectYouthPanel({ targetType, targetId, label, verb = 'selected', alreadySelected = [] }) {
+export default function SelectYouthPanel({ targetType, targetId, label, verb = 'selected', alreadySelected = [], orderByIncome = false }) {
   const { scoped, confirmSelection } = useStore();
+  useStoreData('youth'); // the picker lists every youth record in the organization
   const [query, setQuery] = useState('');
   const [picked, setPicked] = useState([]);
   const [review, setReview] = useState(false);
 
   const done = new Set(alreadySelected);
 
-  const candidates = useMemo(() => scoped('youth')
-    .filter((y) => !y.archived)
-    .filter((y) => fullName(y).toLowerCase().includes(query.toLowerCase())), [scoped, query]);
+  const candidates = useMemo(() => {
+    const rows = scoped('youth')
+      .filter((y) => !y.archived)
+      .filter((y) => fullName(y).toLowerCase().includes(query.toLowerCase()));
+    if (!orderByIncome) return rows;
+    const rank = (youth) => (youth.level === 'High' ? 0 : youth.level === 'Medium' ? 1 : 2);
+    const income = (youth) => (Number(youth.familyIncome) > 0 ? Number(youth.familyIncome) : Number.MAX_SAFE_INTEGER);
+    return [...rows].sort((a, b) => rank(a) - rank(b) || income(a) - income(b) || a.id - b.id);
+  }, [scoped, query, orderByIncome]);
 
   const toggle = (id) => setPicked((list) => (list.includes(id) ? list.filter((x) => x !== id) : [id, ...list]));
   const chosen = candidates.filter((y) => picked.includes(y.id));
   const chosenAll = scoped('youth').filter((y) => picked.includes(y.id));
 
-  const confirm = () => {
-    const count = confirmSelection(targetType, targetId, picked, { verb, label });
+  const confirm = async () => {
+    const count = await confirmSelection(targetType, targetId, picked, { verb, label });
     if (count) { setPicked([]); setReview(false); }
   };
 
@@ -34,7 +41,9 @@ export default function SelectYouthPanel({ targetType, targetId, label, verb = '
     <Section title="Select youth"
       action={<span className="text-xs text-[#8391A4]">{picked.length} selected</span>}>
       <p className="mt-1 text-sm text-[#5A6C82]">
-        Tick the youth, review the list, then confirm. Only the youth you confirm are notified.
+        {orderByIncome
+          ? 'Lower family income appears first. Tick the youth, review the list, then confirm. Only the youth you confirm are notified.'
+          : 'Tick the youth, review the list, then confirm. Only the youth you confirm are notified.'}
       </p>
 
       <div className="mt-3">
@@ -54,7 +63,9 @@ export default function SelectYouthPanel({ targetType, targetId, label, verb = '
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm font-medium text-navy-900">{fullName(youth)}</span>
               <span className="block text-xs text-[#8391A4]">
-                {age(youth.birthDate)} years old · {youth.interests || 'No interest recorded'} · {youth.contact || 'no mobile'}
+                {age(youth.birthDate)} years old
+                {orderByIncome ? ` · ${Number(youth.familyIncome) > 0 ? `₱${Number(youth.familyIncome).toLocaleString()}/month` : 'Income not provided'}` : ` · ${youth.interests || 'No interest recorded'}`}
+                {' · '}{youth.email || 'no email'}
               </span>
             </span>
             {done.has(youth.id) && <Badge value="selected" />}
@@ -72,14 +83,13 @@ export default function SelectYouthPanel({ targetType, targetId, label, verb = '
         <div className="mt-4 rounded-lg border border-navy-900 bg-[#F8FAFD] p-4">
           <p className="text-sm font-semibold text-navy-900">Confirm selection</p>
           <p className="mt-1 text-xs text-[#5A6C82]">
-            These {chosenAll.length} youth will be marked {verb} for {label} and will each receive an in-app
-            notification, a simulated SMS, and a simulated email. No one else is notified.
+            {`These ${chosenAll.length} youth will get an email invitation for ${label}. They confirm in their YouthSync account if they will join.`}
           </p>
           <ul className="mt-3 space-y-1 text-sm text-navy-900">
             {chosenAll.map((youth) => (
               <li key={youth.id} className="flex justify-between gap-2">
                 <span>{fullName(youth)}</span>
-                <span className="text-xs text-[#8391A4]">{youth.contact || 'no mobile'}</span>
+                <span className="text-xs text-[#8391A4]">{youth.email || 'no email'}</span>
               </li>
             ))}
           </ul>

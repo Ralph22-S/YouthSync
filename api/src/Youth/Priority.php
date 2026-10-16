@@ -21,12 +21,16 @@ final class Priority
         $studying = (bool) ($youth['studying'] ?? false);
         $skills = $youth['skills'] ?? [];
 
-        if ($income > 0 && $income <= 12000) {
+        if ($income <= 0) {
+            $reasons[] = 'Income not provided';
+        } elseif ($income <= 12000) {
             $score += 3;
             $reasons[] = 'Low family income (₱' . number_format($income) . '/month)';
-        } elseif ($income > 0 && $income <= 20000) {
+        } elseif ($income <= 20000) {
             $score += 1;
             $reasons[] = 'Modest family income (₱' . number_format($income) . '/month)';
+        } else {
+            $reasons[] = 'Higher family income (₱' . number_format($income) . '/month)';
         }
 
         if ($members >= 6 && $perCapita > 0 && $perCapita < 3000) {

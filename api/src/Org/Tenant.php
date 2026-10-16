@@ -11,6 +11,7 @@ final class Tenant
     public const SESSION_ORG_KEY = 'organization_id';
     public const SESSION_USER_KEY = 'user_id';
     public const SESSION_ROLE_KEY = 'role_code';
+    public const SESSION_YOUTH_KEY = 'youth_id';
 
     public function __construct(private PDO $pdo)
     {
@@ -70,7 +71,10 @@ final class Tenant
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute(['user_id' => $userId]);
         $row = $stmt->fetch();
-        return $row === false ? null : $row;
+        if ($row === false) {
+            return null;
+        }
+        return PlanLimits::applyExpiry($this->pdo, $row, 'organization_id');
     }
 
     public function publicOrganization(array $row): array

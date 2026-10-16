@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PLANS } from '../data/mock.js';
-import { api, friendlyApiMessage } from '../lib/api.js';
+import { api, fetchAllPages as fetchEveryPage, friendlyApiMessage } from '../lib/api.js';
 import { itemsOf } from '../lib/mappers.js';
 
-/** One page is plenty for a console listing; the loaders below walk the rest. */
-const PER_PAGE = 100;
 
 export const mapAdminUser = (snapshot) => {
   const user = snapshot?.user || {};
@@ -24,36 +21,44 @@ export const mapAdminUser = (snapshot) => {
   };
 };
 
-/** Walks every page of an admin listing so counts and badges stay honest. */
+/**
+ * Walks every page of an admin listing. Only used for collections a screen
+ * asks for (see ensureData); the list screens page on the server.
+ */
 const fetchAllPages = async (path, query = {}) => {
-  const first = await api.get(path, { query: { ...query, page: 1, perPage: PER_PAGE } });
-  const items = [...itemsOf(first)];
-  const pages = Math.max(1, Number(first?.pages) || 1);
-  for (let page = 2; page <= pages; page += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    const next = await api.get(path, { query: { ...query, page, perPage: PER_PAGE } });
-    items.push(...itemsOf(next));
-  }
-  return { payload: first, items };
+  const all = await fetchEveryPage(path, query, { perPage: 100 });
+  return { payload: all, items: itemsOf(all) };
 };
 
 /**
  * The System Administrator console, backed by the PHP API.
  *
- * Organizations, accounts, payments and the activity trail are live. Plan and
- * billing-cycle changes are not part of this phase and say so rather than
- * quietly editing a copy that the server never sees.
+ * Organizations, accounts, the activity trail and subscription
+ * changes (change plan, extend, cancel, run cycle) are all live API calls; the
+ * plan catalog comes from the backend PlanLimits config.
  */
+const EMPTY_ORG_COUNTS = Object.freeze({});
+
+/**
+ * Whole collections a screen can ask for with useStoreData / NeedsStoreData.
+ * Only 'orgs' (the subscription board) still needs every row; everything else
+ * is read a page at a time or by id.
+ */
+const ADMIN_GROUPS = ['orgs'];
+
 export function useAdminApiStore(mock, snapshot) {
   const [orgs, setOrgs] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [payments, setPayments] = useState([]);
-  const [activity, setActivity] = useState([]);
-  const [paymentTotals, setPaymentTotals] = useState({ collected: 0, refunded: 0, pending: 0, failed: 0 });
+  // Organization status counts ({ all, pending, active, ... }) from a one-row
+  // /admin/organizations request: the sidebar badge and console counters.
+  const [orgCounts, setOrgCounts] = useState(EMPTY_ORG_COUNTS);
+  const [readyGroups, setReadyGroups] = useState(() => new Set());
+  const wantedGroups = useRef(new Set());
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState(null);
   const [flash, setFlash] = useState(null);
   const [mutating, setMutating] = useState(false);
+  // Bumped after every console reload so server-paged screens refetch their page.
+  const [dataVersion, setDataVersion] = useState(0);
   const loadGen = useRef(0);
 
   const user = useMemo(() => (snapshot ? mapAdminUser(snapshot) : null), [snapshot]);
@@ -67,52 +72,84 @@ export function useAdminApiStore(mock, snapshot) {
     return null;
   }, [notify]);
 
+  /**
+   * Sign-in (and every save) reads only the organization status counts, one
+   * row. Whole collections are fetched when a screen asks for them and are
+   * then refreshed with each reload.
+   */
   const load = useCallback(async () => {
     const gen = ++loadGen.current;
     setAdminLoading(true);
     setAdminError(null);
+    const groups = [...wantedGroups.current];
     try {
-      const [orgResult, userResult, paymentResult, activityResult] = await Promise.allSettled([
-        fetchAllPages('/admin/organizations', { sort: 'status' }),
-        fetchAllPages('/admin/users'),
-        fetchAllPages('/admin/payments'),
-        api.get('/admin/activity', { query: { page: 1, perPage: 200 } }),
+      const [countResult, orgResult] = await Promise.allSettled([
+        api.get('/admin/organizations', { query: { page: 1, perPage: 1 } }),
+        groups.includes('orgs') ? fetchAllPages('/admin/organizations', { sort: 'status' }) : Promise.resolve(null),
       ]);
       if (gen !== loadGen.current) return;
 
-      if (orgResult.status === 'rejected') throw orgResult.reason;
+      if (countResult.status === 'rejected') throw countResult.reason;
+      setOrgCounts(countResult.value?.counts || EMPTY_ORG_COUNTS);
 
-      setOrgs(orgResult.value.items);
-      setUsers(userResult.status === 'fulfilled' ? userResult.value.items : []);
-      setPayments(paymentResult.status === 'fulfilled' ? paymentResult.value.items : []);
-      setPaymentTotals(
-        paymentResult.status === 'fulfilled'
-          ? paymentResult.value.payload?.totals || { collected: 0, refunded: 0, pending: 0, failed: 0 }
-          : { collected: 0, refunded: 0, pending: 0, failed: 0 }
-      );
-      setActivity(activityResult.status === 'fulfilled' ? itemsOf(activityResult.value) : []);
-
-      const partial = [userResult, paymentResult, activityResult].find((r) => r.status === 'rejected');
-      setAdminError(partial ? friendlyApiMessage(partial.reason, 'Some console data could not be loaded.') : null);
+      if (orgResult.status === 'fulfilled' && orgResult.value) setOrgs(orgResult.value.items);
+      if (orgResult.status === 'rejected') {
+        setAdminError(friendlyApiMessage(orgResult.reason, 'The organization list could not be loaded.'));
+      } else {
+        setReadyGroups((current) => {
+          const next = new Set(current);
+          groups.forEach((group) => next.add(group));
+          return next;
+        });
+      }
     } catch (err) {
       if (gen !== loadGen.current || err?.name === 'AbortError') return;
       setAdminError(friendlyApiMessage(err, 'Unable to load the administrator console.'));
     } finally {
-      if (gen === loadGen.current) setAdminLoading(false);
+      if (gen === loadGen.current) {
+        setAdminLoading(false);
+        setDataVersion((n) => n + 1);
+      }
     }
   }, []);
+
+  // The sign-in load and a screen asking for a collection usually happen in the
+  // same commit (the screen's effect runs first); one queued load serves both.
+  const pendingLoad = useRef(null);
+  const scheduleLoad = useCallback(() => {
+    if (!pendingLoad.current) {
+      pendingLoad.current = Promise.resolve().then(() => {
+        pendingLoad.current = null;
+        return load();
+      });
+    }
+    return pendingLoad.current;
+  }, [load]);
 
   useEffect(() => {
     if (!snapshot) {
       setOrgs([]);
-      setUsers([]);
-      setPayments([]);
-      setActivity([]);
+      setOrgCounts(EMPTY_ORG_COUNTS);
+      wantedGroups.current = new Set();
+      setReadyGroups(new Set());
       return undefined;
     }
-    load();
+    scheduleLoad();
     return () => { loadGen.current += 1; };
-  }, [snapshot, load]);
+  }, [snapshot, scheduleLoad]);
+
+  /** A screen needs whole collections: fetch the ones not asked for before. */
+  const ensureData = useCallback((keys) => {
+    const missing = keys.filter((key) => ADMIN_GROUPS.includes(key) && !wantedGroups.current.has(key));
+    if (missing.length === 0 || !snapshot) return;
+    missing.forEach((key) => wantedGroups.current.add(key));
+    scheduleLoad();
+  }, [scheduleLoad, snapshot]);
+
+  const dataReady = useCallback(
+    (keys) => keys.every((key) => !ADMIN_GROUPS.includes(key) || readyGroups.has(key)),
+    [readyGroups]
+  );
 
   const run = useCallback(async (fn, successMessage) => {
     setMutating(true);
@@ -151,10 +188,13 @@ export function useAdminApiStore(mock, snapshot) {
       await load();
       notify(`${created.name} was created and its Premium trial has started.`);
       return created;
+    } catch (err) {
+      fail(err, 'Unable to create the organization.');
+      throw err;
     } finally {
       setMutating(false);
     }
-  }, [load, notify]);
+  }, [fail, load, notify]);
 
   /**
    * One filtered page straight from the database. The console list uses this so
@@ -173,30 +213,57 @@ export function useAdminApiStore(mock, snapshot) {
     []
   );
 
-  const orgPayments = useCallback(
-    (id, query = {}) => api.get(`/admin/organizations/${id}/payments`, { query: { perPage: 50, ...query } }),
-    []
-  );
+  // ---- subscriptions -------------------------------------------------------
 
-  /** Throws on failure so the form can show the API's field messages inline. */
-  const recordPayment = useCallback(async (organizationId, values) => {
+  /** GET /admin/organizations/{id}/subscription: plan, status, usage, limits and the plan catalog. */
+  const orgSubscription = useCallback((id) => api.get(`/admin/organizations/${id}/subscription`), []);
+
+  /**
+   * Runs one subscription action, reloads the console on success and returns
+   * the server response. Throws the ApiError so the dialog can show the
+   * server's own message; nothing is reported as done unless the API said so.
+   */
+  const subscriptionAction = useCallback(async (request, successMessage) => {
     setMutating(true);
     try {
-      const saved = await api.post(`/admin/organizations/${organizationId}/payments`, values);
+      const result = await request();
       await load();
-      notify(`Payment ${saved.reference} recorded.`);
-      return saved;
+      notify(successMessage(result), result?.warning ? 'warning' : 'success');
+      return result;
     } finally {
       setMutating(false);
     }
   }, [load, notify]);
 
-  // ---- not part of this phase --------------------------------------------
+  const setOrgPlan = useCallback((id, plan, cycle) => subscriptionAction(
+    () => api.post(`/admin/organizations/${id}/subscription/plan`, { plan, cycle }),
+    (result) => result?.warning || `Plan changed to ${result?.subscription?.planName}.`
+  ), [subscriptionAction]);
 
-  const readOnly = (what) => () => notify(
-    `${what} is managed on the server and is not editable from this console yet.`,
-    'warning'
-  );
+  /** `value` is a number of days or { days } / { expiresAt: 'YYYY-MM-DD' }. */
+  const extendOrg = useCallback((id, value) => subscriptionAction(
+    () => api.post(`/admin/organizations/${id}/subscription/extend`, typeof value === 'object' && value !== null ? value : { days: Number(value) }),
+    (result) => `Subscription extended to ${result?.subscription?.expiresAt}.`
+  ), [subscriptionAction]);
+
+  const cancelOrgSub = useCallback((id, reason = '') => subscriptionAction(
+    () => api.post(`/admin/organizations/${id}/subscription/cancel`, { reason }),
+    () => 'Subscription cancelled. Free plan limits now apply; records are kept.'
+  ), [subscriptionAction]);
+
+  const runCycle = useCallback(async () => {
+    try {
+      return await subscriptionAction(
+        () => api.post('/admin/subscriptions/run-cycle', {}),
+        (result) => (result?.expired
+          ? `${result.expired} subscription(s) past their end date were marked expired.`
+          : 'No subscriptions were past their end date.')
+      );
+    } catch (err) {
+      fail(err, 'Unable to run the subscription cycle.');
+      return null;
+    }
+  }, [fail, subscriptionAction]);
 
   return {
     sessionKind: 'admin',
@@ -204,17 +271,19 @@ export function useAdminApiStore(mock, snapshot) {
     adminLoading,
     adminError,
     retryAdmin: load,
+    dataVersion,
     mutating,
+    ensureData,
+    dataReady,
 
+    // Whole list only after a screen called useStoreData('orgs').
     orgs,
-    users,
-    plans: PLANS,
-    paymentTotals,
+    orgCounts,
     db: {
       ...mock.db,
       youth: [],
-      payments,
-      activity,
+      payments: [],
+      activity: [],
     },
 
     flash,
@@ -227,13 +296,24 @@ export function useAdminApiStore(mock, snapshot) {
     createOrg,
     queryOrganizations,
     orgActivity,
-    orgPayments,
-    recordPayment,
 
-    runCycle: readOnly('The subscription cycle'),
-    setOrgPlan: readOnly('Plan assignment'),
-    extendOrg: readOnly('Subscription extension'),
-    cancelOrgSub: readOnly('Subscription cancellation'),
-    toggleUser: readOnly('Account activation'),
+    orgSubscription,
+    runCycle,
+    setOrgPlan,
+    extendOrg,
+    cancelOrgSub,
+    queryUsers: useCallback(
+      (query = {}) => api.get('/admin/users', { query }),
+      []
+    ),
+
+    toggleUser: (id, active) => run(
+      () => api.post(`/admin/users/${id}/status`, { status: active ? 'inactive' : 'active' }),
+      active ? 'Account deactivated.' : 'Account activated.'
+    ),
+    resetUserPassword: (id) => run(
+      () => api.post(`/admin/users/${id}/reset-password`, {}),
+      'A temporary password was generated. The user must change it on next login.'
+    ),
   };
 }

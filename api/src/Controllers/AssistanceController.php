@@ -30,7 +30,7 @@ final class AssistanceController
     public function store(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->assistance->create($ctx['organization_id'], Json::readBody(), $ctx['membership']), 201);
+        Json::success($this->assistance->create($ctx['organization_id'], Json::readBody(), $ctx['membership'], $ctx['user']), 201);
     }
 
     public function update(array $params): void
@@ -40,20 +40,21 @@ final class AssistanceController
             $ctx['organization_id'],
             (int) $params['id'],
             Json::readBody(),
-            $ctx['membership']
+            $ctx['membership'],
+            $ctx['user']
         ));
     }
 
     public function archive(array $params): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->assistance->archive($ctx['organization_id'], (int) $params['id'], $ctx['membership']));
+        Json::success($this->assistance->archive($ctx['organization_id'], (int) $params['id'], $ctx['membership'], $ctx['user']));
     }
 
     public function destroy(array $params): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        $this->assistance->delete($ctx['organization_id'], (int) $params['id']);
+        $this->assistance->delete($ctx['organization_id'], (int) $params['id'], $ctx['user']);
         Json::success(['deleted' => true]);
     }
 
@@ -66,7 +67,18 @@ final class AssistanceController
     public function storeType(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->assistance->createType($ctx['organization_id'], Json::readBody()), 201);
+        Json::success($this->assistance->createType($ctx['organization_id'], Json::readBody(), $ctx['user']), 201);
+    }
+
+    public function invite(array $params): void
+    {
+        $ctx = $this->guard->requireSkOfficial();
+        $body = Json::readBody();
+        $ids = $body['youthIds'] ?? $body['youth_ids'] ?? [];
+        if (!is_array($ids)) {
+            Json::validation(['youthIds' => 'Select at least one youth.']);
+        }
+        Json::success($this->assistance->invite($ctx['organization_id'], (int) $params['id'], $ids, $ctx['user']));
     }
 
     public function storeBeneficiary(array $params): void
@@ -75,21 +87,22 @@ final class AssistanceController
         Json::success($this->assistance->saveBeneficiary(
             $ctx['organization_id'],
             (int) $params['id'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ), 201);
     }
 
     public function destroyBeneficiary(array $params): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        $this->assistance->deleteBeneficiary($ctx['organization_id'], (int) $params['id']);
+        $this->assistance->deleteBeneficiary($ctx['organization_id'], (int) $params['id'], $ctx['user']);
         Json::success(['deleted' => true]);
     }
 
     public function storeRequirement(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->assistance->addRequirement($ctx['organization_id'], Json::readBody()), 201);
+        Json::success($this->assistance->addRequirement($ctx['organization_id'], Json::readBody(), $ctx['user']), 201);
     }
 
     public function updateRequirement(array $params): void
@@ -98,14 +111,15 @@ final class AssistanceController
         Json::success($this->assistance->updateRequirement(
             $ctx['organization_id'],
             (int) $params['id'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ));
     }
 
     public function destroyRequirement(array $params): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        $this->assistance->deleteRequirement($ctx['organization_id'], (int) $params['id']);
+        $this->assistance->deleteRequirement($ctx['organization_id'], (int) $params['id'], $ctx['user']);
         Json::success(['deleted' => true]);
     }
 }

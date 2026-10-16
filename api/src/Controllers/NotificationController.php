@@ -42,7 +42,8 @@ final class NotificationController
         Json::success($this->notifications->markRead(
             $ctx['organization_id'],
             (int) $ctx['user']['id'],
-            (int) $params['id']
+            (int) $params['id'],
+            $ctx['user']
         ));
     }
 
@@ -52,7 +53,8 @@ final class NotificationController
         Json::readBody();
         Json::success($this->notifications->markAllRead(
             $ctx['organization_id'],
-            (int) $ctx['user']['id']
+            (int) $ctx['user']['id'],
+            $ctx['user']
         ));
     }
 
@@ -62,7 +64,20 @@ final class NotificationController
         Json::success($this->notifications->delete(
             $ctx['organization_id'],
             (int) $ctx['user']['id'],
-            (int) $params['id']
+            (int) $params['id'],
+            $ctx['user']
         ));
     }
+    public function smsDeliveries(array $params = []): void
+    {
+        $ctx = $this->guard->requireSkOfficial();
+        Json::success($this->notifications->listSmsDeliveries($ctx['organization_id'], $_GET));
+    }
+
+    public function emailDeliveries(array $params = []): void
+    {
+        $ctx = $this->guard->requireSkOfficial();
+        Json::success($this->notifications->listEmailDeliveries($ctx['organization_id'], $_GET));
+    }
+
 }

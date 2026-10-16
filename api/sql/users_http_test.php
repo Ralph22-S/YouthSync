@@ -268,7 +268,11 @@ $limit = req('plan_limit_free', 'POST', "$base/sk/users", json_encode([
 ]), $sk4);
 $tests[] = $limit;
 $expect['plan_limit_free'] = [403];
-$logic['plan_limit_code'] = (payload($limit)['error']['code'] ?? '') === 'PLAN_LIMIT';
+$limitError = payload($limit)['error'] ?? [];
+$logic['plan_limit_code'] = ($limitError['code'] ?? '') === 'PLAN_LIMIT_REACHED'
+    && ($limitError['resource'] ?? '') === 'accounts'
+    && ($limitError['limit'] ?? null) === 1
+    && is_int($limitError['usage'] ?? null) && $limitError['usage'] >= 1;
 
 $failed = [];
 foreach ($tests as $t) {

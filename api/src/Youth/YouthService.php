@@ -4,23 +4,31 @@ declare(strict_types=1);
 namespace YouthSync\Youth;
 
 use PDO;
+use YouthSync\Admin\ActivityLog;
 use YouthSync\Auth\Password;
 use YouthSync\Http\Json;
+use YouthSync\Http\Pagination;
+use YouthSync\Notifications\EmailService;
 use YouthSync\Org\PlanLimits;
 
 final class YouthService
 {
-    public function __construct(private PDO $pdo)
+    private YouthFileStore $files;
+
+    /** @var array<int, array<string, array{name: string, type: string, size: int}>> */
+    private array $fileCache = [];
+
+    /** @var array<int, true> */
+    private array $filePrimed = [];
+
+    public function __construct(private PDO $pdo, private ?EmailService $email = null)
     {
+        $this->files = new YouthFileStore($pdo);
     }
 
     public function countActive(int $organizationId): int
     {
-        $stmt = $this->pdo->prepare(
-            'SELECT COUNT(*) FROM youth WHERE organization_id = :org AND archived = 0'
-        );
-        $stmt->execute(['org' => $organizationId]);
-        return (int) $stmt->fetchColumn();
+        return PlanLimits::count($this->pdo, 'youth', $organizationId);
     }
 
     /**
@@ -30,26 +38,21 @@ final class YouthService
      */
     public function list(int $organizationId, array $query, array $orgRow): array
     {
-        $q = trim((string) ($query['q'] ?? ''));
+        $q = Pagination::search($query);
         $priority = trim((string) ($query['priority'] ?? ''));
         $employment = trim((string) ($query['employment'] ?? ''));
         $archived = self::queryBool($query['archived'] ?? false);
         $sort = (string) ($query['sort'] ?? 'newest');
-        $page = max(1, (int) ($query['page'] ?? 1));
-        $perPage = (int) ($query['perPage'] ?? $query['per_page'] ?? 15);
-        if ($perPage < 1) {
-            $perPage = 15;
-        }
-        if ($perPage > 100) {
-            $perPage = 100;
-        }
+        $paging = Pagination::fromQuery($query, 15, 100);
 
         $where = ['organization_id = :org', 'archived = :archived'];
         $params = ['org' => $organizationId, 'archived' => $archived ? 1 : 0];
 
         if ($q !== '') {
-            $where[] = '(first_name LIKE :q OR last_name LIKE :q OR school LIKE :q OR address LIKE :q OR contact LIKE :q OR code LIKE :q)';
-            $params['q'] = '%' . $q . '%';
+            $where[] = Pagination::likeAny(
+                ['first_name', 'last_name', "CONCAT(first_name, ' ', last_name)", 'school', 'address', 'contact', 'code'],
+                $q, 'q', $params
+            );
         }
         if ($priority !== '') {
             $where[] = 'priority_level = :priority';
@@ -70,18 +73,16 @@ final class YouthService
         $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM youth WHERE {$sqlWhere}");
         $countStmt->execute($params);
         $total = (int) $countStmt->fetchColumn();
-        $pages = max(1, (int) ceil($total / $perPage));
-        if ($page > $pages) {
-            $page = $pages;
-        }
-        $offset = ($page - 1) * $perPage;
+        $meta = $paging->meta($total);
 
         $stmt = $this->pdo->prepare(
-            "SELECT * FROM youth WHERE {$sqlWhere} ORDER BY {$order} LIMIT {$perPage} OFFSET {$offset}"
+            "SELECT * FROM youth WHERE {$sqlWhere} ORDER BY {$order} {$paging->limitSql()}"
         );
         $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+        $this->primeFiles(array_map(static fn (array $row): int => (int) $row['id'], $rows));
         $items = [];
-        foreach ($stmt->fetchAll() as $row) {
+        foreach ($rows as $row) {
             $items[] = $this->publicYouth($row);
         }
 
@@ -91,10 +92,7 @@ final class YouthService
 
         return [
             'items' => $items,
-            'page' => $page,
-            'perPage' => $perPage,
-            'total' => $total,
-            'pages' => $pages,
+            ...$meta,
             'usage' => [
                 'youth' => $usage,
                 'limit' => $limit,
@@ -109,26 +107,83 @@ final class YouthService
     }
 
     /**
+     * @param array<string, mixed>|null $file
+     * @param array<string, mixed> $actor
+     * @return array{name: string, type: string, size: int, url: string}
+     */
+    public function storeFile(int $organizationId, int $id, string $kind, ?array $file, array $actor = []): array
+    {
+        $existing = $this->requireInOrg($organizationId, $id);
+        $meta = $this->files->store($organizationId, $id, $kind, $file);
+        unset($this->filePrimed[$id]);
+        $meta['url'] = $this->fileUrl($id, $kind);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'youth.updated',
+            'youth',
+            ($kind === 'photo' ? 'Updated profile photo for ' : 'Updated supporting document for ')
+                . (string) ($existing['code'] ?? $id),
+            ['youthId' => $id, 'entityType' => 'youth', 'entityId' => $id]
+        );
+        return $meta;
+    }
+
+    /**
+     * @param array<string, mixed> $actor
+     */
+    public function removeFile(int $organizationId, int $id, string $kind, array $actor = []): void
+    {
+        $existing = $this->requireInOrg($organizationId, $id);
+        $this->files->remove($organizationId, $id, $kind);
+        unset($this->filePrimed[$id]);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'youth.updated',
+            'youth',
+            ($kind === 'photo' ? 'Removed profile photo for ' : 'Removed supporting document for ')
+                . (string) ($existing['code'] ?? $id),
+            ['youthId' => $id, 'entityType' => 'youth', 'entityId' => $id]
+        );
+    }
+
+    public function sendFile(int $organizationId, int $id, string $kind): never
+    {
+        $this->requireInOrg($organizationId, $id);
+        $this->files->send($organizationId, $id, $kind);
+    }
+
+    /**
      * @param array<string, mixed> $input
      * @param array<string, mixed> $orgRow
+     * @param array<string, mixed> $actor authenticated SK user from SkGuard
      * @return array<string, mixed>
      */
-    public function create(int $organizationId, array $input, array $orgRow): array
+    public function create(int $organizationId, array $input, array $orgRow, array $actor = []): array
     {
         $values = YouthValidator::normalize($input);
         $errors = YouthValidator::validate($values, true);
+        $errors = array_merge($errors, \YouthSync\Identity\ContactIdentity::youthErrors(
+            $this->pdo,
+            (string) $values['email'],
+            (string) $values['contact']
+        ));
         if ($errors) {
             Json::validation($errors);
         }
 
-        $plan = PlanLimits::effective($orgRow);
-        $usage = $this->countActive($organizationId);
-        if ($plan['youth'] !== null && $usage + 1 > $plan['youth']) {
-            Json::error('PLAN_LIMIT', PlanLimits::youthLimitMessage($plan), 403);
+        if ($this->duplicateExists($organizationId, $values)) {
+            Json::error('CONFLICT', 'A youth record with this name already exists in your organization.', 409);
         }
 
-        if ($this->duplicateExists($organizationId, $values)) {
-            Json::error('CONFLICT', 'A youth record with this name and date of birth already exists in your organization.', 409);
+        // Count-then-insert under a row lock on the organization (plan limit is concurrency-safe).
+        $plan = PlanLimits::effective($orgRow);
+        $locked = $plan['youth'] !== null && PlanLimits::lockOrganization($this->pdo, $organizationId);
+        if ($plan['youth'] !== null) {
+            PlanLimits::assertRoom($this->pdo, 'youth', $plan, $this->countActive($organizationId));
         }
 
         $priority = Priority::evaluate($values);
@@ -155,6 +210,7 @@ final class YouthService
 
         $this->pdo->prepare($sql)->execute($this->bind($organizationId, $code, $values, $priority));
         $id = (int) $this->pdo->lastInsertId();
+        PlanLimits::releaseLock($this->pdo, $locked);
         $youth = $this->get($organizationId, $id);
 
         $account = $this->maybeCreateAccount($organizationId, $id, $values);
@@ -163,19 +219,176 @@ final class YouthService
         $payload = ['youth' => $youth];
         if ($account !== null) {
             $payload['temporaryPassword'] = $account['password'];
+            $payload['temporary_password'] = $account['password'];
+            $payload['user'] = [
+                'id' => $account['userId'],
+                'email' => $account['email'],
+                'role' => 'YOUTH',
+                'youth_id' => $id,
+            ];
             $payload['accountCreated'] = true;
         } elseif (!empty($values['createAccount'])) {
             $payload['accountCreated'] = false;
             $payload['warning'] = 'That email already has an account. The youth record was saved without one.';
         }
 
+        $name = trim((string) ($youth['firstName'] ?? $youth['first_name'] ?? '') . ' ' . (string) ($youth['lastName'] ?? $youth['last_name'] ?? ''));
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'youth.created',
+            'youth',
+            'Created youth record ' . (string) ($youth['code'] ?? $id) . ($name !== '' ? ' - ' . $name : ''),
+            ['youthId' => $id, 'entityType' => 'youth', 'entityId' => $id]
+        );
+        if ($account !== null) {
+            // The temporary password is returned to the SK once and never logged.
+            ActivityLog::recordSk(
+                $this->pdo,
+                $organizationId,
+                $actor,
+                'user.created',
+                'user',
+                'Created a youth login account for youth record ' . (string) ($youth['code'] ?? $id),
+                ['youthId' => $id, 'entityType' => 'user', 'entityId' => (int) $account['userId']]
+            );
+        }
+
         return $payload;
+    }
+
+    /**
+     * Same first name, last name, and birth date inside one organization.
+     *
+     * @param array<string, mixed> $values
+     * @return array<string, mixed>|null
+     */
+    public function signupMatch(int $organizationId, array $values): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT y.id, y.archived, y.email, u.id AS user_id
+             FROM youth y
+             LEFT JOIN users u ON u.youth_id = y.id
+             WHERE y.organization_id = :org
+               AND LOWER(TRIM(y.first_name)) = :fn
+               AND LOWER(TRIM(COALESCE(y.middle_name, \'\'))) = :mn
+               AND LOWER(TRIM(y.last_name)) = :ln
+             ORDER BY y.id ASC
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'org' => $organizationId,
+            'fn' => mb_strtolower(trim((string) ($values['firstName'] ?? ''))),
+            'mn' => mb_strtolower(trim((string) ($values['middleName'] ?? ''))),
+            'ln' => mb_strtolower(trim((string) ($values['lastName'] ?? ''))),
+        ]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    /**
+     * Creates a self-registered youth record and login, or attaches the login
+     * to the existing record with the same name.
+     */
+    public function registerSelf(int $organizationId, array $input, string $passwordHash, array $orgRow): int
+    {
+        $email = strtolower(trim((string) ($input['email'] ?? '')));
+        $input['email'] = $email;
+        $match = $this->signupMatch($organizationId, $input);
+        if ($match !== null) {
+            return $this->attachSignupLogin($organizationId, $match, $email, $input, $passwordHash);
+        }
+        $input['createAccount'] = true;
+        $input['accountEmail'] = $email;
+        $payload = $this->create($organizationId, $input, $orgRow, []);
+        $userId = (int) ($payload['user']['id'] ?? 0);
+        $youthId = (int) ($payload['youth']['id'] ?? 0);
+        if ($userId < 1 || empty($payload['accountCreated'])) {
+            Json::error('CONFLICT', 'That Gmail address already has a YouthSync account. Check the email that was sent to that inbox, then log in. Another account cannot be created.', 409);
+        }
+        $this->pdo->prepare(
+            'UPDATE users SET password_hash = :hash, must_change_password = 0 WHERE id = :id'
+        )->execute([
+            'hash' => $passwordHash,
+            'id' => $userId,
+        ]);
+        if ($youthId > 0) {
+            $this->pdo->prepare(
+                'UPDATE youth SET self_registered = 1 WHERE id = :id AND organization_id = :org'
+            )->execute([
+                'id' => $youthId,
+                'org' => $organizationId,
+            ]);
+        }
+        return $userId;
+    }
+
+    /**
+     * @param array<string, mixed> $match
+     * @param array<string, mixed> $input
+     */
+    private function attachSignupLogin(int $organizationId, array $match, string $email, array $input, string $passwordHash): int
+    {
+        if ((int) $match['archived'] === 1) {
+            Json::error('VALIDATION_ERROR', 'This youth record is archived. Ask your SK to restore it.', 422);
+        }
+        if ((int) ($match['user_id'] ?? 0) > 0) {
+            Json::error('CONFLICT', 'This youth record already has a YouthSync account. Check the Gmail message that was sent, then log in. Another account cannot be created.', 409);
+        }
+        $youthId = (int) $match['id'];
+        $identity = \YouthSync\Identity\ContactIdentity::youthErrors(
+            $this->pdo,
+            $email,
+            (string) ($input['contact'] ?? ''),
+            $youthId
+        );
+        if ($identity) {
+            Json::error('CONFLICT', (string) reset($identity), 409);
+        }
+        $currentEmail = strtolower(trim((string) ($match['email'] ?? '')));
+        if ($currentEmail === '') {
+            $this->pdo->prepare(
+                'UPDATE youth SET email = :email WHERE id = :id AND organization_id = :org'
+            )->execute([
+                'email' => $email,
+                'id' => $youthId,
+                'org' => $organizationId,
+            ]);
+        }
+
+        $roleId = (int) $this->pdo->query("SELECT id FROM roles WHERE code = 'YOUTH' LIMIT 1")->fetchColumn();
+        if ($roleId < 1) {
+            Json::error('SERVER_ERROR', 'Youth sign-up is not available right now.', 500);
+        }
+        $this->pdo->prepare(
+            'INSERT INTO users (email, password_hash, first_name, last_name, role_id, youth_id, status, must_change_password)
+             VALUES (:email, :hash, :fn, :ln, :role_id, :youth_id, :status, 0)'
+        )->execute([
+            'email' => $email,
+            'hash' => $passwordHash,
+            'fn' => (string) ($input['firstName'] ?? ''),
+            'ln' => (string) ($input['lastName'] ?? ''),
+            'role_id' => $roleId,
+            'youth_id' => $youthId,
+            'status' => 'active',
+        ]);
+        $userId = (int) $this->pdo->lastInsertId();
+        $this->pdo->prepare(
+            'INSERT INTO organization_users (user_id, organization_id, is_owner, status)
+             VALUES (:user_id, :org, 0, :status)'
+        )->execute([
+            'user_id' => $userId,
+            'org' => $organizationId,
+            'status' => 'active',
+        ]);
+        return $userId;
     }
 
     /**
      * @param array<string, mixed> $input
      */
-    public function update(int $organizationId, int $id, array $input): array
+    public function update(int $organizationId, int $id, array $input, array $actor = []): array
     {
         $existingRow = $this->requireInOrg($organizationId, $id);
         $existing = $this->publicYouth($existingRow);
@@ -197,11 +410,17 @@ final class YouthService
         $input = array_merge($existing, $input);
         $values = YouthValidator::normalize($input);
         $errors = YouthValidator::validate($values, true);
+        $errors = array_merge($errors, \YouthSync\Identity\ContactIdentity::youthErrors(
+            $this->pdo,
+            (string) $values['email'],
+            (string) $values['contact'],
+            $id
+        ));
         if ($errors) {
             Json::validation($errors);
         }
         if ($this->duplicateExists($organizationId, $values, $id)) {
-            Json::error('CONFLICT', 'A youth record with this name and date of birth already exists in your organization.', 409);
+            Json::error('CONFLICT', 'A youth record with this name already exists in your organization.', 409);
         }
 
         $priority = Priority::evaluate($values);
@@ -235,20 +454,32 @@ final class YouthService
             'id' => $id,
         ]);
 
-        return $this->get($organizationId, $id);
+        $youth = $this->get($organizationId, $id);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'youth.updated',
+            'youth',
+            'Updated youth record ' . (string) ($youth['code'] ?? $id),
+            ['youthId' => $id, 'entityType' => 'youth', 'entityId' => $id]
+        );
+        return $youth;
     }
 
     /**
      * @param array<string, mixed> $orgRow
      */
-    public function archive(int $organizationId, int $id, array $orgRow, bool $archived): array
+    public function archive(int $organizationId, int $id, array $orgRow, bool $archived, array $actor = []): array
     {
-        $this->requireInOrg($organizationId, $id);
-        if (!$archived) {
+        $current = $this->requireInOrg($organizationId, $id);
+        $locked = false;
+        // Restoring an archived record brings it back into the youth limit.
+        if (!$archived && (int) ($current['archived'] ?? 0) === 1) {
             $plan = PlanLimits::effective($orgRow);
-            $usage = $this->countActive($organizationId);
-            if ($plan['youth'] !== null && $usage + 1 > $plan['youth']) {
-                Json::error('PLAN_LIMIT', PlanLimits::youthLimitMessage($plan), 403);
+            if ($plan['youth'] !== null) {
+                $locked = PlanLimits::lockOrganization($this->pdo, $organizationId);
+                PlanLimits::assertRoom($this->pdo, 'youth', $plan, $this->countActive($organizationId));
             }
         }
         $stmt = $this->pdo->prepare(
@@ -259,12 +490,24 @@ final class YouthService
             'id' => $id,
             'org' => $organizationId,
         ]);
-        return $this->get($organizationId, $id);
+        PlanLimits::releaseLock($this->pdo, $locked);
+        $youth = $this->get($organizationId, $id);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            $archived ? 'youth.archived' : 'youth.restored',
+            'youth',
+            ($archived ? 'Archived' : 'Restored') . ' youth record ' . (string) ($youth['code'] ?? $id),
+            ['youthId' => $id, 'entityType' => 'youth', 'entityId' => $id]
+        );
+        return $youth;
     }
 
-    public function delete(int $organizationId, int $id): void
+    public function delete(int $organizationId, int $id, array $actor = []): void
     {
-        $this->requireInOrg($organizationId, $id);
+        $existing = $this->requireInOrg($organizationId, $id);
+        $storedFiles = $this->files->storageNames($id);
 
         $userStmt = $this->pdo->prepare('SELECT id FROM users WHERE youth_id = :id');
         $userStmt->execute(['id' => $id]);
@@ -286,6 +529,28 @@ final class YouthService
             $this->pdo->rollBack();
             throw $e;
         }
+
+        $this->files->unlinkNames($storedFiles);
+
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'youth.deleted',
+            'youth',
+            'Deleted youth record ' . (string) ($existing['code'] ?? $id),
+            ['youthId' => $id, 'entityType' => 'youth', 'entityId' => $id]
+        );
+    }
+
+    public function importPreview(array $orgRow, array $file): array
+    {
+        $plan = PlanLimits::effective($orgRow);
+        if (!$plan['csv_import']) {
+            Json::error('PLAN_FEATURE', PlanLimits::csvNotIncludedMessage($plan), 403);
+        }
+        $rows = YouthImportFile::parse($file);
+        return ['rows' => $rows, 'total' => count($rows)];
     }
 
     /**
@@ -293,7 +558,7 @@ final class YouthService
      * @param array<string, mixed> $orgRow
      * @return array<string, mixed>
      */
-    public function import(int $organizationId, array $rows, array $orgRow): array
+    public function import(int $organizationId, array $rows, array $orgRow, array $actor = []): array
     {
         $plan = PlanLimits::effective($orgRow);
         if (!$plan['csv_import']) {
@@ -302,7 +567,6 @@ final class YouthService
         if ($rows === []) {
             Json::error('VALIDATION_ERROR', 'No youth rows were provided to import.', 422);
         }
-
         $prepared = [];
         foreach ($rows as $index => $row) {
             if (!is_array($row)) {
@@ -329,6 +593,22 @@ final class YouthService
             if ($values['contact'] === '') {
                 unset($errors['contact']);
             }
+            if ($values['email'] !== '' && !$this->isGmail((string) $values['email'])) {
+                $errors['email'] = 'Use a Gmail address, like name@gmail.com, or leave email blank.';
+            }
+            $errors = array_merge($errors, \YouthSync\Identity\ContactIdentity::youthErrors(
+                $this->pdo,
+                (string) $values['email'],
+                (string) $values['contact']
+            ));
+            foreach ($prepared as $earlier) {
+                if ($values['email'] !== '' && strtolower((string) $earlier['email']) === strtolower((string) $values['email'])) {
+                    $errors['email'] = \YouthSync\Identity\ContactIdentity::EMAIL_MESSAGE;
+                }
+                if ($values['contact'] !== '' && (string) $earlier['contact'] === (string) $values['contact']) {
+                    $errors['contact'] = \YouthSync\Identity\ContactIdentity::CONTACT_MESSAGE;
+                }
+            }
             if ($errors) {
                 Json::error(
                     'VALIDATION_ERROR',
@@ -337,25 +617,67 @@ final class YouthService
                     ['fields' => $errors, 'row' => $index + 1]
                 );
             }
+            $nameKey = mb_strtolower(trim((string) $values['firstName']) . '|' . trim((string) ($values['middleName'] ?? '')) . '|' . trim((string) $values['lastName']));
+            foreach ($prepared as $earlierName) {
+                $earlierKey = mb_strtolower(trim((string) $earlierName['firstName']) . '|' . trim((string) ($earlierName['middleName'] ?? '')) . '|' . trim((string) $earlierName['lastName']));
+                if ($earlierKey === $nameKey) {
+                    Json::error(
+                        'CONFLICT',
+                        'Row ' . ($index + 1) . ': a youth record with this name is already in this file.',
+                        409,
+                        ['row' => $index + 1]
+                    );
+                }
+            }
             if ($this->duplicateExists($organizationId, $values)) {
                 Json::error(
                     'CONFLICT',
-                    'Row ' . ($index + 1) . ' already exists in your youth records.',
+                    'Row ' . ($index + 1) . ': a youth record with this name already exists in your organization.',
                     409,
                     ['row' => $index + 1]
                 );
             }
+            if ($this->isGmail((string) $values['email'])) {
+                $loginTaken = $this->pdo->prepare('SELECT id FROM users WHERE email = :email LIMIT 1');
+                $loginTaken->execute(['email' => $values['email']]);
+                if ($loginTaken->fetch()) {
+                    Json::error(
+                        'CONFLICT',
+                        'Row ' . ($index + 1) . ': that Gmail address already has a YouthSync account. Another account cannot be created for it.',
+                        409,
+                        ['row' => $index + 1]
+                    );
+                }
+            }
             $prepared[] = $values;
         }
 
-        $usage = $this->countActive($organizationId);
-        $remaining = $plan['youth'] === null ? null : max(0, $plan['youth'] - $usage);
-        if ($remaining !== null && count($prepared) > $remaining) {
-            Json::error('PLAN_LIMIT', PlanLimits::csvOverflowMessage(count($prepared), $remaining, $plan), 403);
+        $needsNotice = false;
+        foreach ($prepared as $values) {
+            if ($this->isGmail((string) $values['email'])) {
+                $needsNotice = true;
+                break;
+            }
+        }
+        if ($needsNotice && ($this->email === null || !$this->email->isConfigured())) {
+            Json::error('VALIDATION_ERROR', 'Email is not configured, so youth with a Gmail address cannot be notified about their accounts.', 422);
         }
 
         $created = [];
+        $notices = [];
         $this->pdo->beginTransaction();
+        PlanLimits::lockOrganization($this->pdo, $organizationId);
+        $usage = $this->countActive($organizationId);
+        $remaining = $plan['youth'] === null ? null : max(0, $plan['youth'] - $usage);
+        PlanLimits::assertRoom(
+            $this->pdo,
+            'youth',
+            $plan,
+            $usage,
+            count($prepared),
+            $remaining === null ? null : PlanLimits::csvOverflowMessage(count($prepared), $remaining, $plan),
+            ['requested' => count($prepared), 'remaining' => $remaining]
+        );
         try {
             foreach (array_reverse($prepared) as $values) {
                 $priority = Priority::evaluate($values);
@@ -379,12 +701,54 @@ final class YouthService
                     )
                     SQL;
                 $this->pdo->prepare($sql)->execute($this->bind($organizationId, $code, $values, $priority));
-                $created[] = (int) $this->pdo->lastInsertId();
+                $id = (int) $this->pdo->lastInsertId();
+                $created[] = $id;
+                if ($this->isGmail((string) $values['email'])) {
+                    $account = $this->maybeCreateAccount($organizationId, $id, [
+                        'createAccount' => true,
+                        'accountEmail' => $values['email'],
+                        'firstName' => $values['firstName'],
+                        'lastName' => $values['lastName'],
+                    ]);
+                    if ($account === null) {
+                        throw new \RuntimeException('login');
+                    }
+                    $notices[] = [
+                        'name' => trim($values['firstName'] . ' ' . $values['lastName']),
+                        'email' => $account['email'],
+                        'temporaryPassword' => $account['password'],
+                    ];
+                }
             }
             $this->pdo->commit();
         } catch (\Throwable $e) {
-            $this->pdo->rollBack();
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            if ($e instanceof \RuntimeException && $e->getMessage() === 'login') {
+                Json::error('VALIDATION_ERROR', 'A login could not be created for one of the Gmail addresses.', 422);
+            }
             throw $e;
+        }
+
+        $unsent = [];
+        foreach (array_reverse($notices) as $notice) {
+            $sent = $this->email->send(
+                $notice['email'],
+                'Your YouthSync account is ready',
+                '<p>An SK council created a YouthSync account for you.</p>'
+                    . '<p>Sign in with this Gmail address: <strong>' . htmlspecialchars($notice['email'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                    . '<p>Temporary password: <strong>' . htmlspecialchars($notice['temporaryPassword'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                    . '<p>Change this password the first time you sign in.</p>',
+                'An SK council created a YouthSync account for you. Sign in with '
+                    . $notice['email']
+                    . '. Temporary password: '
+                    . $notice['temporaryPassword']
+                    . '. Change this password the first time you sign in.'
+            );
+            if (empty($sent['ok'])) {
+                $unsent[] = $notice;
+            }
         }
 
         $items = [];
@@ -392,9 +756,21 @@ final class YouthService
             $items[] = $this->get($organizationId, $id);
         }
 
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'youth.imported',
+            'youth',
+            'Imported ' . count($items) . ' youth record(s)',
+            ['entityType' => 'youth']
+        );
+
         return [
             'imported' => count($items),
             'items' => $items,
+            'notified' => count($notices) - count($unsent),
+            'unsent' => $unsent,
         ];
     }
 
@@ -419,13 +795,13 @@ final class YouthService
         $sql = 'SELECT id FROM youth
                 WHERE organization_id = :org
                   AND LOWER(TRIM(first_name)) = :fn
-                  AND LOWER(TRIM(last_name)) = :ln
-                  AND birth_date = :bd';
+                  AND LOWER(TRIM(COALESCE(middle_name, \'\'))) = :mn
+                  AND LOWER(TRIM(last_name)) = :ln';
         $params = [
             'org' => $organizationId,
-            'fn' => mb_strtolower(trim($values['firstName'])),
-            'ln' => mb_strtolower(trim($values['lastName'])),
-            'bd' => $values['birthDate'],
+            'fn' => mb_strtolower(trim((string) $values['firstName'])),
+            'mn' => mb_strtolower(trim((string) ($values['middleName'] ?? ''))),
+            'ln' => mb_strtolower(trim((string) $values['lastName'])),
         ];
         if ($exceptId !== null) {
             $sql .= ' AND id <> :id';
@@ -497,7 +873,7 @@ final class YouthService
 
     /**
      * @param array<string, mixed> $values
-     * @return array{password:string}|null
+     * @return array{password:string,userId:int,email:string}|null
      */
     private function maybeCreateAccount(int $organizationId, int $youthId, array $values): ?array
     {
@@ -516,7 +892,7 @@ final class YouthService
             return null;
         }
 
-        $plain = 'YTS-' . (string) random_int(100000, 999999);
+        $plain = $this->temporaryPassword();
         $this->pdo->prepare(
             'INSERT INTO users (email, password_hash, first_name, last_name, role_id, youth_id, status, must_change_password)
              VALUES (:email, :hash, :fn, :ln, :role_id, :youth_id, :status, 1)'
@@ -539,20 +915,43 @@ final class YouthService
             'status' => 'active',
         ]);
 
-        return ['password' => $plain];
+        return [
+            'password' => $plain,
+            'userId' => $userId,
+            'email' => (string) $values['accountEmail'],
+        ];
+    }
+
+    /**
+     * Shown once in the create response. Only Password::hash() is stored.
+     */
+    private function isGmail(string $email): bool
+    {
+        return (bool) preg_match('/^[^@\s]+@gmail\.com$/', strtolower(trim($email)));
+    }
+
+    private function temporaryPassword(): string
+    {
+        return 'Yts-' . bin2hex(random_bytes(4));
     }
 
     private function accountStatus(int $youthId): string
     {
         $stmt = $this->pdo->prepare(
-            'SELECT status FROM users WHERE youth_id = :id LIMIT 1'
+            'SELECT status, must_change_password FROM users WHERE youth_id = :id LIMIT 1'
         );
         $stmt->execute(['id' => $youthId]);
-        $status = $stmt->fetchColumn();
-        if ($status === false) {
+        $row = $stmt->fetch();
+        if ($row === false) {
             return 'not_registered';
         }
-        return $status === 'active' ? 'active' : 'inactive';
+        if ((string) $row['status'] !== 'active') {
+            return 'inactive';
+        }
+        if ((int) $row['must_change_password'] === 1) {
+            return 'password_pending';
+        }
+        return 'active';
     }
 
     /**
@@ -613,9 +1012,42 @@ final class YouthService
             'accountStatus' => $this->accountStatus((int) $row['id']),
             'createdAt' => substr((string) $row['created_at'], 0, 10),
             'addedAt' => $row['added_at'],
-            'photo' => null,
-            'document' => null,
+            'photo' => $this->fileView((int) $row['id'], 'photo'),
+            'document' => $this->fileView((int) $row['id'], 'document'),
         ];
+    }
+
+    /**
+     * @param list<int> $ids
+     */
+    private function primeFiles(array $ids): void
+    {
+        $grouped = $this->files->grouped($ids);
+        foreach ($grouped as $youthId => $kinds) {
+            $this->fileCache[(int) $youthId] = $kinds;
+            $this->filePrimed[(int) $youthId] = true;
+        }
+    }
+
+    /**
+     * @return array{name: string, type: string, size: int, url: string}|null
+     */
+    private function fileView(int $youthId, string $kind): ?array
+    {
+        if (!isset($this->filePrimed[$youthId])) {
+            $this->primeFiles([$youthId]);
+        }
+        $meta = $this->fileCache[$youthId][$kind] ?? null;
+        if ($meta === null) {
+            return null;
+        }
+        $meta['url'] = $this->fileUrl($youthId, $kind);
+        return $meta;
+    }
+
+    private function fileUrl(int $youthId, string $kind): string
+    {
+        return '/sk/youth/' . $youthId . '/' . $kind;
     }
 
     private static function queryBool(mixed $value): bool

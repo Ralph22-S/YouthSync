@@ -23,7 +23,8 @@ final class AttendanceController
             (int) $params['id'],
             (int) $ctx['user']['id'],
             $ctx['membership'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ), 201);
     }
 
@@ -42,20 +43,20 @@ final class AttendanceController
     public function scan(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        $result = $this->attendance->scan($ctx['organization_id'], $ctx['membership'], Json::readBody());
+        $result = $this->attendance->scan($ctx['organization_id'], $ctx['membership'], Json::readBody(), $ctx['user']);
         Json::success($result, !empty($result['created']) ? 201 : 200);
     }
 
     public function confirm(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->attendance->confirm($ctx['organization_id'], Json::readBody()));
+        Json::success($this->attendance->confirm($ctx['organization_id'], Json::readBody(), $ctx['user']));
     }
 
     public function manual(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->attendance->manual($ctx['organization_id'], Json::readBody()), 201);
+        Json::success($this->attendance->manual($ctx['organization_id'], Json::readBody(), $ctx['user']), 201);
     }
 
     public function show(array $params): void
@@ -70,7 +71,8 @@ final class AttendanceController
         Json::success($this->attendance->updateStatus(
             $ctx['organization_id'],
             (int) $params['id'],
-            Json::readBody()
+            Json::readBody(),
+            $ctx['user']
         ));
     }
 }

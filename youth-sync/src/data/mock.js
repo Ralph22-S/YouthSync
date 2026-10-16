@@ -119,8 +119,10 @@ export function evaluatePriority(y) {
   const members = Number(y.familyMembers) || 0;
   const perCapita = members > 0 ? income / members : income;
 
-  if (income > 0 && income <= 12000) { score += 3; reasons.push(`Low family income (₱${income.toLocaleString()}/month)`); }
-  else if (income > 0 && income <= 20000) { score += 1; reasons.push(`Modest family income (₱${income.toLocaleString()}/month)`); }
+  if (income <= 0) reasons.push('Income not provided');
+  else if (income <= 12000) { score += 3; reasons.push(`Low family income (₱${income.toLocaleString()}/month)`); }
+  else if (income <= 20000) { score += 1; reasons.push(`Modest family income (₱${income.toLocaleString()}/month)`); }
+  else reasons.push(`Higher family income (₱${income.toLocaleString()}/month)`);
 
   if (members >= 6 && perCapita > 0 && perCapita < 3000) { score += 2; reasons.push(`Large household with low income per member (${members} members)`); }
   if (y.guardianEmployment === 'Unemployed') { score += 3; reasons.push('Parent or guardian unemployed'); }
@@ -520,6 +522,7 @@ export const youthCode = (youth) => youth?.code || `YTH-${String(youth?.id ?? 0)
  */
 export const ACCOUNT_STATUSES = {
   not_registered: 'Not registered',
+  password_pending: 'Account ready',
   active: 'Active',
   inactive: 'Inactive',
 };
@@ -533,7 +536,7 @@ export const temporaryPassword = () => {
 export const makeYouthToken = (youth) => `YSYOUTH-${youthCode(youth)}`;
 
 export const parseYouthToken = (token) => {
-  const match = /^YSYOUTH-(YTH-\d+)$/.exec(String(token || '').trim().toUpperCase());
+  const match = /^YSYOUTH-([A-Z0-9-]{1,32})$/.exec(String(token || '').trim().toUpperCase());
   return match ? match[1] : null;
 };
 
@@ -543,6 +546,7 @@ export const APPLICATION_STATUSES = {
   approved: 'Approved',
   rejected: 'Rejected',
   needs_resubmission: 'Resubmission requested',
+  withdrawn: 'Withdrawn',
 };
 
 export const REQUIREMENT_STATUSES = {

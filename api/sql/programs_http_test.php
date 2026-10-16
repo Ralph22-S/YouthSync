@@ -1,34 +1,46 @@
 <?php
 declare(strict_types=1);
 
+/**
+ * Safe Programs / Events HTTP check.
+ *
+ * Uses existing demo SK, admin, and youth sessions. Creates programs and events,
+ * then deletes only those exact rows.
+ */
 if (PHP_SAPI !== 'cli') {
     http_response_code(403);
     exit("Forbidden\n");
 }
 
+$base = 'http://localhost/YouthSync/api';
+$adminEmail = 'admin@skmms.test';
+$skEmail = 'sk1@demo.test';
+$sk2Email = 'sk2@demo.test';
+$youthEmail = 'youth-auth-test@example.test';
+$demoPassword = 'YouthSync1!';
+$youthPassword = 'YouthAuthTest1!';
+$stamp = date('YmdHis');
+$date = '2026-12-06';
+
 require dirname(__DIR__) . '/config/config.php';
 require dirname(__DIR__) . '/config/database.php';
-
 $pdo = youthsync_pdo();
-$leftover = $pdo->query(
-    "SELECT id, organization_id, kind, name, scheduled_on
-     FROM programs
-     WHERE name LIKE 'PhaseThree Test%'"
-)->fetchAll(PDO::FETCH_ASSOC);
-if ($leftover) {
-    fwrite(STDERR, "STOP: pre-existing PhaseThree test records found. No cleanup was performed.\n");
-    foreach ($leftover as $row) {
-        fwrite(STDERR, json_encode($row, JSON_UNESCAPED_UNICODE) . PHP_EOL);
+
+$failed = 0;
+$createdIds = [];
+
+$check = static function (string $name, bool $ok, string $detail = '') use (&$failed): void {
+    echo ($ok ? 'PASS' : 'FAIL') . " {$name}";
+    if (!$ok && $detail !== '') {
+        echo ' — ' . $detail;
     }
-    exit(2);
-}
+    echo "\n";
+    if (!$ok) {
+        $failed++;
+    }
+};
 
-$base = 'http://localhost/YouthSync_UI_Refresh/api';
-$usersBefore = (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
-$orgsBefore = (int) $pdo->query('SELECT COUNT(*) FROM organizations')->fetchColumn();
-$youthBefore = (int) $pdo->query('SELECT COUNT(*) FROM youth')->fetchColumn();
-
-function req(string $name, string $method, string $url, ?string $json, string $cookie): array
+function prog_req(string $method, string $url, ?string $json, string $cookie): array
 {
     $ch = curl_init($url);
     $headers = ['Accept: application/json'];
@@ -38,7 +50,7 @@ function req(string $name, string $method, string $url, ?string $json, string $c
         CURLOPT_HEADER => true,
         CURLOPT_COOKIEJAR => $cookie,
         CURLOPT_COOKIEFILE => $cookie,
-        CURLOPT_TIMEOUT => 20,
+        CURLOPT_TIMEOUT => 30,
     ]);
     if ($json !== null) {
         $headers[] = 'Content-Type: application/json';
@@ -49,209 +61,271 @@ function req(string $name, string $method, string $url, ?string $json, string $c
     if ($raw === false) {
         $err = curl_error($ch);
         curl_close($ch);
-        return ['name' => $name, 'status' => 0, 'body' => $err];
+        return ['status' => 0, 'body' => $err, 'json' => null];
     }
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $body = substr($raw, $headerSize);
     curl_close($ch);
-    return ['name' => $name, 'status' => $status, 'body' => $body];
+    $body = substr($raw, $headerSize);
+    $decoded = json_decode($body, true);
+    return ['status' => $status, 'body' => $body, 'json' => is_array($decoded) ? $decoded : null];
 }
 
-function payload(array $t): array
+function prog_data(array $row): array
 {
-    $decoded = json_decode($t['body'], true);
-    return is_array($decoded) ? $decoded : [];
+    $data = $row['json']['data'] ?? null;
+    return is_array($data) ? $data : [];
 }
 
-$sk1 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p3_sk1.txt';
-$sk2 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p3_sk2.txt';
-$sk4 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p3_sk4.txt';
-$empty = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p3_empty.txt';
-foreach ([$sk1, $sk2, $sk4, $empty] as $f) {
-    @unlink($f);
+function prog_detail(array $row): string
+{
+    $code = (string) ($row['json']['error']['code'] ?? '');
+    $message = (string) ($row['json']['error']['message'] ?? '');
+    return 'status=' . $row['status'] . ($code !== '' ? " code={$code}" : '') . ' ' . substr($message, 0, 180);
 }
 
-$login = static fn (string $email): string => json_encode(['email' => $email, 'password' => 'YouthSync1!']);
-$createdIds = [];
-$createdYouthIds = [];
-$tests = [];
-
-$tests[] = req('unauth_list', 'GET', "$base/sk/programs", null, $empty);
-$tests[] = req('login_sk1', 'POST', "$base/auth/login", $login('sk1@demo.test'), $sk1);
-$tests[] = req('me_sk1', 'GET', "$base/auth/me", null, $sk1);
-$tests[] = req('list_programs', 'GET', "$base/sk/programs", null, $sk1);
-
-$programBody = json_encode([
-    'kind' => 'program',
-    'name' => 'PhaseThree Test Program',
-    'category' => 'Leadership',
-    'scheduledOn' => '2026-10-01',
-    'startsAt' => '08:00',
-    'endsAt' => '15:00',
-    'location' => 'Barangay Hall',
-    'description' => 'Phase 3 test program',
-    'status' => 'draft',
-    'organization_id' => 999,
-    'orgId' => 4,
-]);
-$created = req('create_program', 'POST', "$base/sk/programs", $programBody, $sk1);
-$tests[] = $created;
-$programId = (int) (payload($created)['data']['id'] ?? 0);
-if ($programId) {
-    $createdIds[] = $programId;
+function prog_jar(): string
+{
+    $path = tempnam(sys_get_temp_dir(), 'ysprog');
+    return $path === false ? sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ysprog-' . bin2hex(random_bytes(4)) : $path;
 }
 
-$tests[] = req('get_program', 'GET', "$base/sk/programs/{$programId}", null, $sk1);
-$tests[] = req('update_program', 'PATCH', "$base/sk/programs/{$programId}", json_encode([
-    'name' => 'PhaseThree Test Program',
-    'location' => 'Covered Court',
-    'scheduledOn' => '2026-10-01',
-    'kind' => 'program',
-    'organization_id' => 4,
-]), $sk1);
-$tests[] = req('list_after_create', 'GET', "$base/sk/programs", null, $sk1);
-
-$tests[] = req('invalid_required', 'POST', "$base/sk/programs", json_encode(['kind' => 'program']), $sk1);
-$tests[] = req('invalid_date', 'POST', "$base/sk/programs", json_encode([
-    'kind' => 'program',
-    'name' => 'Bad Date Program',
-    'scheduledOn' => 'not-a-date',
-]), $sk1);
-$tests[] = req('invalid_status', 'POST', "$base/sk/programs", json_encode([
-    'kind' => 'program',
-    'name' => 'Bad Status Program',
-    'scheduledOn' => '2026-10-02',
-    'status' => 'not-a-status',
-]), $sk1);
-$tests[] = req('invalid_times', 'POST', "$base/sk/programs", json_encode([
-    'kind' => 'event',
-    'name' => 'Bad Times Event',
-    'scheduledOn' => '2026-10-03',
-    'startsAt' => '15:00',
-    'endsAt' => '08:00',
-]), $sk1);
-$tests[] = req('duplicate_program', 'POST', "$base/sk/programs", $programBody, $sk1);
-
-$eventBody = json_encode([
-    'name' => 'PhaseThree Test Event',
-    'category' => 'Sports & Recreation',
-    'scheduledOn' => '2026-10-15',
-    'startsAt' => '09:00',
-    'endsAt' => '12:00',
-    'location' => 'Plaza',
-    'status' => 'draft',
-    'organization_id' => 2,
-]);
-$createdEvent = req('create_event', 'POST', "$base/sk/events", $eventBody, $sk1);
-$tests[] = $createdEvent;
-$eventId = (int) (payload($createdEvent)['data']['id'] ?? 0);
-if ($eventId) {
-    $createdIds[] = $eventId;
+function prog_ids(PDO $pdo): array
+{
+    return array_map('intval', $pdo->query('SELECT id FROM programs ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
 }
 
-$tests[] = req('get_event', 'GET', "$base/sk/events/{$eventId}", null, $sk1);
-$tests[] = req('update_event', 'PATCH', "$base/sk/events/{$eventId}", json_encode([
-    'name' => 'PhaseThree Test Event',
-    'location' => 'Gym',
-    'scheduledOn' => '2026-10-15',
-]), $sk1);
-$tests[] = req('list_events', 'GET', "$base/sk/events", null, $sk1);
-$tests[] = req('invalid_event', 'POST', "$base/sk/events", json_encode(['name' => '']), $sk1);
-$tests[] = req('archive_program', 'POST', "$base/sk/programs/{$programId}/archive", null, $sk1);
+$beforeIds = prog_ids($pdo);
+$beforeCount = count($beforeIds);
+$beforeEvents = (int) $pdo->query("SELECT COUNT(*) FROM programs WHERE kind = 'event'")->fetchColumn();
+echo "programs_before={$beforeCount} events_before={$beforeEvents}\n";
 
-$tests[] = req('login_sk2', 'POST', "$base/auth/login", $login('sk2@demo.test'), $sk2);
-$tests[] = req('cross_get_program', 'GET', "$base/sk/programs/{$programId}", null, $sk2);
-$tests[] = req('cross_update_program', 'PATCH', "$base/sk/programs/{$programId}", json_encode([
-    'name' => 'Hacked',
-    'scheduledOn' => '2026-10-01',
-    'kind' => 'program',
-]), $sk2);
-$tests[] = req('cross_delete_program', 'DELETE', "$base/sk/programs/{$programId}", null, $sk2);
-$tests[] = req('cross_get_event', 'GET', "$base/sk/events/{$eventId}", null, $sk2);
-$tests[] = req('cross_nested_event', 'POST', "$base/sk/programs/{$programId}/events", json_encode([
-    'name' => 'PhaseThree Nested Hijack',
-    'scheduledOn' => '2026-10-20',
-    'organization_id' => 1,
-]), $sk2);
-$tests[] = req('list_events_for_program', 'GET', "$base/sk/programs/{$programId}/events", null, $sk1);
+$admin = prog_jar();
+$sk = prog_jar();
+$sk2 = prog_jar();
+$youth = prog_jar();
+$anon = prog_jar();
 
-$youthCreate = req('phase2_create_youth', 'POST', "$base/sk/youth", json_encode([
-    'firstName' => 'PhaseThree',
-    'lastName' => 'YouthIso',
-    'birthDate' => '2004-01-01',
-    'address' => 'Test address',
-    'contact' => '09170009999',
-    'interests' => ['Sports'],
-]), $sk1);
-$tests[] = $youthCreate;
-$youthId = (int) (payload($youthCreate)['data']['youth']['id'] ?? 0);
-if ($youthId) {
-    $createdYouthIds[] = $youthId;
-}
-$tests[] = req('phase2_youth_list', 'GET', "$base/sk/youth", null, $sk1);
-$tests[] = req('phase2_cross_youth', 'GET', "$base/sk/youth/{$youthId}", null, $sk2);
+try {
+    $anonList = prog_req('GET', "$base/sk/programs", null, $anon);
+    $check('anonymous_programs_401', $anonList['status'] === 401, prog_detail($anonList));
+    $anonEvents = prog_req('GET', "$base/sk/events", null, $anon);
+    $check('anonymous_events_401', $anonEvents['status'] === 401, prog_detail($anonEvents));
 
-$tests[] = req('login_sk4', 'POST', "$base/auth/login", $login('sk4@demo.test'), $sk4);
-$freeOne = req('free_program_one', 'POST', "$base/sk/programs", json_encode([
-    'kind' => 'program',
-    'name' => 'PhaseThree Test Program Free',
-    'scheduledOn' => '2026-11-01',
-]), $sk4);
-$tests[] = $freeOne;
-$freeId = (int) (payload($freeOne)['data']['id'] ?? 0);
-if ($freeId) {
-    $createdIds[] = $freeId;
-}
-$tests[] = req('free_program_two', 'POST', "$base/sk/programs", json_encode([
-    'kind' => 'event',
-    'name' => 'PhaseThree Test Event Free',
-    'scheduledOn' => '2026-11-02',
-]), $sk4);
-if ($freeId) {
-    $tests[] = req("cleanup_program_{$freeId}", 'DELETE', "$base/sk/programs/{$freeId}", null, $sk4);
-    $createdIds = array_values(array_filter($createdIds, static fn ($id) => (int) $id !== $freeId));
-}
+    $adminLogin = prog_req('POST', "$base/auth/login", json_encode(['email' => $adminEmail, 'password' => $demoPassword]), $admin);
+    $check('admin_login', $adminLogin['status'] === 200, prog_detail($adminLogin));
+    $adminPrograms = prog_req('GET', "$base/sk/programs", null, $admin);
+    $check('admin_programs_403', $adminPrograms['status'] === 403, prog_detail($adminPrograms));
+    $adminEvents = prog_req('POST', "$base/sk/events", json_encode(['name' => 'Nope', 'scheduledOn' => $date]), $admin);
+    $check('admin_events_403', $adminEvents['status'] === 403, prog_detail($adminEvents));
 
-$tests[] = req('logout', 'POST', "$base/auth/logout", null, $sk1);
-$tests[] = req('me_after_logout', 'GET', "$base/auth/me", null, $sk1);
-$tests[] = req('relogin', 'POST', "$base/auth/login", $login('sk1@demo.test'), $sk1);
+    $youthLogin = prog_req('POST', "$base/auth/login", json_encode(['email' => $youthEmail, 'password' => $youthPassword]), $youth);
+    $check('youth_login', $youthLogin['status'] === 200, prog_detail($youthLogin));
+    $youthPrograms = prog_req('GET', "$base/sk/programs", null, $youth);
+    $check('youth_programs_403', $youthPrograms['status'] === 403, prog_detail($youthPrograms));
+    $youthEvents = prog_req('GET', "$base/sk/events", null, $youth);
+    $check('youth_events_403', $youthEvents['status'] === 403, prog_detail($youthEvents));
 
-foreach ($createdIds as $id) {
-    $tests[] = req("cleanup_program_{$id}", 'DELETE', "$base/sk/programs/{$id}", null, $sk1);
-}
-foreach ($createdYouthIds as $id) {
-    $tests[] = req("cleanup_youth_{$id}", 'DELETE', "$base/sk/youth/{$id}", null, $sk1);
-}
+    $skLogin = prog_req('POST', "$base/auth/login", json_encode(['email' => $skEmail, 'password' => $demoPassword]), $sk);
+    $check('sk_login', $skLogin['status'] === 200, prog_detail($skLogin));
+    $me = prog_req('GET', "$base/auth/me", null, $sk);
+    $orgId = (int) (prog_data($me)['organization']['id'] ?? 0);
+    $check('sk_org', $me['status'] === 200 && $orgId > 0, prog_detail($me));
 
-$tests[] = req('get_deleted_program', 'GET', "$base/sk/programs/{$programId}", null, $sk1);
-$tests[] = req('get_deleted_event', 'GET', "$base/sk/events/{$eventId}", null, $sk1);
+    $sk2Login = prog_req('POST', "$base/auth/login", json_encode(['email' => $sk2Email, 'password' => $demoPassword]), $sk2);
+    $check('sk2_login', $sk2Login['status'] === 200, prog_detail($sk2Login));
+    $me2 = prog_req('GET', "$base/auth/me", null, $sk2);
+    $org2 = (int) (prog_data($me2)['organization']['id'] ?? 0);
+    $check('sk2_other_org', $org2 > 0 && $org2 !== $orgId, prog_detail($me2));
 
-$usersAfter = (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
-$orgsAfter = (int) $pdo->query('SELECT COUNT(*) FROM organizations')->fetchColumn();
-$youthAfter = (int) $pdo->query('SELECT COUNT(*) FROM youth')->fetchColumn();
-$left = $pdo->query(
-    "SELECT id, name FROM programs WHERE name LIKE 'PhaseThree Test%'"
-)->fetchAll(PDO::FETCH_ASSOC);
+    $programName = "ProgEvt Program {$stamp}";
+    $created = prog_req('POST', "$base/sk/programs", json_encode([
+        'kind' => 'program',
+        'name' => $programName,
+        'category' => 'Leadership',
+        'scheduledOn' => $date,
+        'startsAt' => '08:00',
+        'endsAt' => '15:00',
+        'location' => 'Barangay Hall',
+        'description' => 'Programs HTTP test',
+        'status' => 'draft',
+        'organization_id' => $org2,
+        'orgId' => 999,
+    ]), $sk);
+    $program = prog_data($created);
+    $programId = (int) ($program['id'] ?? 0);
+    if ($programId > 0) {
+        $createdIds[] = $programId;
+    }
+    $check('create_program_201', $created['status'] === 201 && $programId > 0 && ($program['kind'] ?? '') === 'program', prog_detail($created));
+    $check('create_no_password_hash', stripos($created['body'], 'password_hash') === false);
 
-foreach ($tests as $t) {
-    $hasHash = stripos($t['body'], 'password_hash') !== false;
-    echo $t['name'] . "\t" . $t['status'] . "\thash=" . ($hasHash ? 'YES' : 'no') . PHP_EOL;
-    echo $t['body'] . PHP_EOL . PHP_EOL;
-}
+    $rowStmt = $pdo->prepare('SELECT organization_id, kind, name, status, location FROM programs WHERE id = :id');
+    $rowStmt->execute(['id' => $programId]);
+    $row = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('create_scoped_to_session_org', (int) ($row['organization_id'] ?? 0) === $orgId, json_encode($row));
 
-$update = null;
-$create = payload($created);
-foreach ($tests as $t) {
-    if ($t['name'] === 'update_program') {
-        $update = payload($t);
+    $listed = prog_req('GET', "$base/sk/programs?organization_id={$org2}", null, $sk);
+    $items = prog_data($listed)['items'] ?? [];
+    $found = false;
+    if (is_array($items)) {
+        foreach ($items as $item) {
+            if ((int) ($item['id'] ?? 0) === $programId) {
+                $found = true;
+            }
+        }
+    }
+    $check('list_includes_created', $listed['status'] === 200 && $found, prog_detail($listed));
+
+    $shown = prog_req('GET', "$base/sk/programs/{$programId}", null, $sk);
+    $check('read_program', $shown['status'] === 200 && (prog_data($shown)['name'] ?? '') === $programName, prog_detail($shown));
+
+    $updated = prog_req('PATCH', "$base/sk/programs/{$programId}", json_encode([
+        'name' => $programName,
+        'location' => 'Covered Court',
+        'scheduledOn' => $date,
+        'kind' => 'program',
+        'organization_id' => $org2,
+    ]), $sk);
+    $check('update_program', $updated['status'] === 200 && (prog_data($updated)['location'] ?? '') === 'Covered Court', prog_detail($updated));
+    $rowStmt->execute(['id' => $programId]);
+    $row = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('update_kept_org', (int) ($row['organization_id'] ?? 0) === $orgId && ($row['location'] ?? '') === 'Covered Court', json_encode($row));
+
+    $status = prog_req('POST', "$base/sk/programs/{$programId}/status", json_encode([
+        'status' => 'published',
+        'organization_id' => $org2,
+    ]), $sk);
+    $check('status_published', $status['status'] === 200 && (prog_data($status)['status'] ?? '') === 'published', prog_detail($status));
+
+    $archived = prog_req('POST', "$base/sk/programs/{$programId}/archive", json_encode(['organization_id' => $org2]), $sk);
+    $check('archive_program', $archived['status'] === 200 && (prog_data($archived)['status'] ?? '') === 'archived', prog_detail($archived));
+
+    $restored = prog_req('POST', "$base/sk/programs/{$programId}/status", json_encode(['status' => 'draft']), $sk);
+    $check('restore_to_draft', $restored['status'] === 200 && (prog_data($restored)['status'] ?? '') === 'draft', prog_detail($restored));
+
+    $invalid = prog_req('POST', "$base/sk/programs", json_encode(['kind' => 'program']), $sk);
+    $check('invalid_program_422', $invalid['status'] === 422, prog_detail($invalid));
+    $duplicate = prog_req('POST', "$base/sk/programs", json_encode([
+        'kind' => 'program',
+        'name' => $programName,
+        'scheduledOn' => $date,
+        'status' => 'draft',
+    ]), $sk);
+    $check('duplicate_program_409', $duplicate['status'] === 409, prog_detail($duplicate));
+
+    $eventName = "ProgEvt Event {$stamp}";
+    $eventCreated = prog_req('POST', "$base/sk/events", json_encode([
+        'name' => $eventName,
+        'category' => 'Sports & Recreation',
+        'scheduledOn' => '2026-12-07',
+        'startsAt' => '09:00',
+        'endsAt' => '12:00',
+        'location' => 'Plaza',
+        'status' => 'draft',
+        'kind' => 'program',
+        'organization_id' => $org2,
+    ]), $sk);
+    $event = prog_data($eventCreated);
+    $eventId = (int) ($event['id'] ?? 0);
+    if ($eventId > 0) {
+        $createdIds[] = $eventId;
+    }
+    $check('create_event_201', $eventCreated['status'] === 201 && $eventId > 0 && ($event['kind'] ?? '') === 'event', prog_detail($eventCreated));
+    $rowStmt->execute(['id' => $eventId]);
+    $eventRow = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('event_scoped_to_session_org', (int) ($eventRow['organization_id'] ?? 0) === $orgId && ($eventRow['kind'] ?? '') === 'event', json_encode($eventRow));
+
+    $eventShown = prog_req('GET', "$base/sk/events/{$eventId}", null, $sk);
+    $check('read_event', $eventShown['status'] === 200 && (prog_data($eventShown)['name'] ?? '') === $eventName, prog_detail($eventShown));
+    $eventList = prog_req('GET', "$base/sk/events?organization_id={$org2}", null, $sk);
+    $eventItems = prog_data($eventList)['items'] ?? [];
+    $eventFound = false;
+    if (is_array($eventItems)) {
+        foreach ($eventItems as $item) {
+            if ((int) ($item['id'] ?? 0) === $eventId) {
+                $eventFound = true;
+            }
+        }
+    }
+    $check('list_events', $eventList['status'] === 200 && $eventFound, prog_detail($eventList));
+
+    $eventUpdated = prog_req('PATCH', "$base/sk/events/{$eventId}", json_encode([
+        'name' => $eventName,
+        'location' => 'Gym',
+        'scheduledOn' => '2026-12-07',
+        'organization_id' => $org2,
+    ]), $sk);
+    $check('update_event', $eventUpdated['status'] === 200 && (prog_data($eventUpdated)['location'] ?? '') === 'Gym', prog_detail($eventUpdated));
+
+    $eventStatus = prog_req('POST', "$base/sk/programs/{$eventId}/status", json_encode(['status' => 'published']), $sk);
+    $check('event_status_published', $eventStatus['status'] === 200 && (prog_data($eventStatus)['status'] ?? '') === 'published', prog_detail($eventStatus));
+    $eventArchive = prog_req('POST', "$base/sk/programs/{$eventId}/archive", '{}', $sk);
+    $check('event_archive', $eventArchive['status'] === 200 && (prog_data($eventArchive)['status'] ?? '') === 'archived', prog_detail($eventArchive));
+    $eventRestore = prog_req('POST', "$base/sk/programs/{$eventId}/status", json_encode(['status' => 'draft']), $sk);
+    $check('event_restore_draft', $eventRestore['status'] === 200 && (prog_data($eventRestore)['status'] ?? '') === 'draft', prog_detail($eventRestore));
+
+    $badEvent = prog_req('POST', "$base/sk/events", json_encode(['name' => '']), $sk);
+    $check('invalid_event_422', $badEvent['status'] === 422, prog_detail($badEvent));
+
+    $crossGet = prog_req('GET', "$base/sk/programs/{$programId}", null, $sk2);
+    $check('other_sk_cannot_read_program', $crossGet['status'] === 404, prog_detail($crossGet));
+    $crossEvent = prog_req('GET', "$base/sk/events/{$eventId}", null, $sk2);
+    $check('other_sk_cannot_read_event', $crossEvent['status'] === 404, prog_detail($crossEvent));
+    $crossUpdate = prog_req('PATCH', "$base/sk/programs/{$programId}", json_encode([
+        'name' => 'Hacked',
+        'scheduledOn' => $date,
+        'kind' => 'program',
+        'organization_id' => $orgId,
+    ]), $sk2);
+    $check('other_sk_cannot_update', $crossUpdate['status'] === 404, prog_detail($crossUpdate));
+    $crossDelete = prog_req('DELETE', "$base/sk/events/{$eventId}", null, $sk2);
+    $check('other_sk_cannot_delete_event', $crossDelete['status'] === 404, prog_detail($crossDelete));
+    $rowStmt->execute(['id' => $programId]);
+    $still = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('spoof_did_not_change_program', ($still['name'] ?? '') === $programName && (int) ($still['organization_id'] ?? 0) === $orgId, json_encode($still));
+
+    $deletedProgram = prog_req('DELETE', "$base/sk/programs/{$programId}", null, $sk);
+    $check('delete_program', $deletedProgram['status'] === 200, prog_detail($deletedProgram));
+    $deletedEvent = prog_req('DELETE', "$base/sk/events/{$eventId}", null, $sk);
+    $check('delete_event', $deletedEvent['status'] === 200, prog_detail($deletedEvent));
+    $gone = prog_req('GET', "$base/sk/programs/{$programId}", null, $sk);
+    $check('deleted_program_404', $gone['status'] === 404, prog_detail($gone));
+    $goneEvent = prog_req('GET', "$base/sk/events/{$eventId}", null, $sk);
+    $check('deleted_event_404', $goneEvent['status'] === 404, prog_detail($goneEvent));
+} finally {
+    foreach ($createdIds as $id) {
+        $pdo->prepare(
+            "DELETE FROM notifications WHERE related_entity_type = 'program' AND related_entity_id = :id"
+        )->execute(['id' => $id]);
+        $pdo->prepare(
+            "DELETE FROM sms_deliveries WHERE event_code = 'program.published' AND event_id = :id"
+        )->execute(['id' => $id]);
+        $pdo->prepare(
+            "DELETE FROM email_deliveries WHERE event_code = 'program.published' AND event_id = :id"
+        )->execute(['id' => $id]);
+        $stmt = $pdo->prepare(
+            "DELETE FROM programs WHERE id = :id AND name LIKE 'ProgEvt %'"
+        );
+        $stmt->execute(['id' => $id]);
+    }
+    foreach ([$admin, $sk, $sk2, $youth, $anon] as $cookie) {
+        @unlink($cookie);
     }
 }
-echo "program_id={$programId}\n";
-echo "event_id={$eventId}\n";
-echo "create_org_spoof_ignored=" . ((($create['data']['id'] ?? 0) && $programId) ? 'yes' : 'no') . PHP_EOL;
-echo "update_location=" . ($update['data']['location'] ?? '') . PHP_EOL;
-echo "users_before={$usersBefore} users_after={$usersAfter}\n";
-echo "orgs_before={$orgsBefore} orgs_after={$orgsAfter}\n";
-echo "youth_before={$youthBefore} youth_after={$youthAfter}\n";
-echo "leftover_phasetthree=" . count($left) . PHP_EOL;
+
+$afterIds = prog_ids($pdo);
+$afterCount = count($afterIds);
+$afterEvents = (int) $pdo->query("SELECT COUNT(*) FROM programs WHERE kind = 'event'")->fetchColumn();
+$left = $pdo->prepare("SELECT id, name FROM programs WHERE name LIKE :name");
+$left->execute(['name' => "ProgEvt %{$stamp}%"]);
+$leftover = $left->fetchAll(PDO::FETCH_ASSOC);
+
+$check('program_count_restored', $beforeCount === $afterCount && $beforeIds === $afterIds, "before={$beforeCount} after={$afterCount}");
+$check('event_count_restored', $beforeEvents === $afterEvents, "before={$beforeEvents} after={$afterEvents}");
+$check('no_test_rows_left', $leftover === [], json_encode($leftover));
+
+echo "programs_after={$afterCount} events_after={$afterEvents}\n";
+echo "created_ids=" . implode(',', $createdIds) . "\n";
+echo $failed === 0 ? "ALL PASSED\n" : "FAILED {$failed}\n";
+exit($failed === 0 ? 0 : 1);

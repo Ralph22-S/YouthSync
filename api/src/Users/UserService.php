@@ -5,9 +5,12 @@ namespace YouthSync\Users;
 
 use PDO;
 use PDOException;
+use YouthSync\Admin\ActivityLog;
 use YouthSync\Auth\AuthService;
 use YouthSync\Auth\Password;
+use YouthSync\Auth\RememberTokenStore;
 use YouthSync\Http\Json;
+use YouthSync\Http\Pagination;
 use YouthSync\Org\PlanLimits;
 
 final class UserService
@@ -24,41 +27,59 @@ final class UserService
     {
         unset($query['organization_id'], $query['orgId'], $query['organizationId'], $query['org_id']);
 
-        $page = max(1, (int) ($query['page'] ?? 1));
-        $perPage = (int) ($query['perPage'] ?? $query['per_page'] ?? 50);
-        if ($perPage < 1) {
-            $perPage = 50;
-        }
-        if ($perPage > 100) {
-            $perPage = 100;
-        }
+        $paging = Pagination::fromQuery($query, 50, 100);
 
         [$sqlWhere, $params] = $this->orgSkWhere($organizationId);
-        $q = trim((string) ($query['q'] ?? ''));
+
+        // Status totals for the whole organization (before search and filters),
+        // for the screen's summary cards.
+        $countsStmt = $this->pdo->prepare(
+            "SELECT u.status, COUNT(*) AS total FROM {$this->fromSql()} WHERE {$sqlWhere} GROUP BY u.status"
+        );
+        $countsStmt->execute($params);
+        $counts = ['all' => 0, 'active' => 0, 'inactive' => 0];
+        foreach ($countsStmt->fetchAll() as $row) {
+            $key = (string) $row['status'];
+            $counts[$key] = ($counts[$key] ?? 0) + (int) $row['total'];
+            $counts['all'] += (int) $row['total'];
+        }
+
+        $q = Pagination::search($query);
         if ($q !== '') {
-            $sqlWhere .= ' AND (u.first_name LIKE :q OR u.last_name LIKE :q OR u.email LIKE :q)';
-            $params['q'] = '%' . $q . '%';
+            $sqlWhere .= ' AND ' . Pagination::likeAny(
+                ['u.first_name', 'u.last_name', "CONCAT(u.first_name, ' ', u.last_name)", 'u.email'],
+                $q, 'q', $params
+            );
         }
         $status = strtolower(trim((string) ($query['status'] ?? '')));
         if ($status === 'active' || $status === 'inactive') {
             $sqlWhere .= ' AND u.status = :status';
             $params['status'] = $status;
         }
+        // This list only holds SK official accounts, so "youth" matches nothing.
+        $role = strtolower(str_replace(['-', ' '], '_', trim((string) ($query['role'] ?? ''))));
+        if ($role !== '' && $role !== 'sk_official') {
+            if ($role !== 'youth') {
+                Json::validation(['role' => 'Choose sk_official or youth.']);
+            }
+            $sqlWhere .= ' AND 1 = 0';
+        }
+        $order = match (trim((string) ($query['sort'] ?? ''))) {
+            'oldest' => 'u.created_at ASC, u.id ASC',
+            'name' => 'u.first_name ASC, u.last_name ASC, u.id ASC',
+            default => 'u.created_at DESC, u.id DESC',
+        };
 
         $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM {$this->fromSql()} WHERE {$sqlWhere}");
         $countStmt->execute($params);
         $total = (int) $countStmt->fetchColumn();
-        $pages = max(1, (int) ceil(($total ?: 1) / $perPage));
-        if ($page > $pages) {
-            $page = $pages;
-        }
-        $offset = ($page - 1) * $perPage;
+        $meta = $paging->meta($total);
 
         $listStmt = $this->pdo->prepare(
             "SELECT {$this->selectSql()} FROM {$this->fromSql()}
              WHERE {$sqlWhere}
-             ORDER BY u.created_at DESC, u.id DESC
-             LIMIT {$perPage} OFFSET {$offset}"
+             ORDER BY {$order}
+             {$paging->limitSql()}"
         );
         $listStmt->execute($params);
         $items = [];
@@ -68,10 +89,8 @@ final class UserService
 
         return [
             'items' => $items,
-            'page' => $page,
-            'perPage' => $perPage,
-            'total' => $total,
-            'pages' => $pages,
+            ...$meta,
+            'counts' => $counts,
         ];
     }
 
@@ -88,7 +107,7 @@ final class UserService
      * @param array<string, mixed> $orgRow
      * @return array<string, mixed>
      */
-    public function create(int $organizationId, array $input, array $orgRow): array
+    public function create(int $organizationId, array $input, array $orgRow, array $actor = []): array
     {
         unset($input['organization_id'], $input['organizationId'], $input['orgId'], $input['org_id']);
         $values = UserValidator::normalizeCreate($input);
@@ -98,9 +117,6 @@ final class UserService
         }
 
         $plan = PlanLimits::effective($orgRow);
-        if ($plan['accounts'] !== null && $this->countSkAccounts($organizationId) + 1 > $plan['accounts']) {
-            Json::error('PLAN_LIMIT', PlanLimits::accountsLimitMessage($plan), 403);
-        }
 
         $roleId = $this->skOfficialRoleId();
         $plain = $values['password'] !== '' ? $values['password'] : $this->temporaryPassword();
@@ -108,6 +124,11 @@ final class UserService
 
         try {
             $this->pdo->beginTransaction();
+            if ($plan['accounts'] !== null) {
+                // Same transaction as the inserts: organization row lock, then count.
+                PlanLimits::lockOrganization($this->pdo, $organizationId);
+                PlanLimits::assertRoom($this->pdo, 'accounts', $plan, $this->countSkAccounts($organizationId));
+            }
             $this->pdo->prepare(
                 'INSERT INTO users (
                     email, password_hash, first_name, last_name, role_id, status, must_change_password
@@ -147,6 +168,15 @@ final class UserService
         $payload = $this->get($organizationId, $id);
         $payload['temporaryPassword'] = $plain;
         $payload['passwordGenerated'] = $generated;
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'user.created',
+            'user',
+            'Created SK official account ' . $values['email'],
+            ['entityType' => 'user', 'entityId' => $id]
+        );
         return $payload;
     }
 
@@ -154,7 +184,7 @@ final class UserService
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function update(int $organizationId, int $id, array $input): array
+    public function update(int $organizationId, int $id, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['organizationId'], $input['orgId'], $input['org_id']);
         $row = $this->requireInOrg($organizationId, $id);
@@ -208,6 +238,15 @@ final class UserService
                 }
                 throw $e;
             }
+            ActivityLog::recordSk(
+                $this->pdo,
+                $organizationId,
+                $actor,
+                'user.updated',
+                'user',
+                'Updated SK official account',
+                ['entityType' => 'user', 'entityId' => $id]
+            );
         }
 
         return $this->get($organizationId, $id);
@@ -216,7 +255,7 @@ final class UserService
     /**
      * @return array<string, mixed>
      */
-    public function setStatus(int $organizationId, int $actorId, int $id, array $input): array
+    public function setStatus(int $organizationId, int $actorId, int $id, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['organizationId'], $input['orgId'], $input['org_id']);
         $row = $this->requireInOrg($organizationId, $id);
@@ -236,23 +275,33 @@ final class UserService
             'UPDATE users SET status = :status WHERE id = :id'
         )->execute(['status' => $status, 'id' => $id]);
 
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'user.updated',
+            'user',
+            'Set SK official status to ' . $status,
+            ['entityType' => 'user', 'entityId' => $id]
+        );
+
         return $this->get($organizationId, $id);
     }
 
     /**
      * @return array<string, mixed>
      */
-    public function toggleActive(int $organizationId, int $actorId, int $id): array
+    public function toggleActive(int $organizationId, int $actorId, int $id, array $actor = []): array
     {
         $row = $this->requireInOrg($organizationId, $id);
         $next = ($row['status'] ?? '') === 'active' ? 'inactive' : 'active';
-        return $this->setStatus($organizationId, $actorId, $id, ['status' => $next]);
+        return $this->setStatus($organizationId, $actorId, $id, ['status' => $next], $actor);
     }
 
     /**
      * @return array<string, mixed>
      */
-    public function resetPassword(int $organizationId, int $id): array
+    public function resetPassword(int $organizationId, int $id, array $actor = []): array
     {
         $this->requireInOrg($organizationId, $id);
         $plain = $this->temporaryPassword();
@@ -262,15 +311,25 @@ final class UserService
             'hash' => Password::hash($plain),
             'id' => $id,
         ]);
+        $this->forgetRememberTokens($id);
         $payload = $this->get($organizationId, $id);
         $payload['temporaryPassword'] = $plain;
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'user.updated',
+            'user',
+            'Reset SK official password',
+            ['entityType' => 'user', 'entityId' => $id]
+        );
         return $payload;
     }
 
     /**
      * @return array{deleted: true}
      */
-    public function delete(int $organizationId, int $actorId, int $id): array
+    public function delete(int $organizationId, int $actorId, int $id, array $actor = []): array
     {
         $row = $this->requireInOrg($organizationId, $id);
         if ($id === $actorId) {
@@ -296,6 +355,16 @@ final class UserService
             }
             throw $e;
         }
+
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'user.deleted',
+            'user',
+            'Deleted SK official account',
+            ['entityType' => 'user', 'entityId' => $id]
+        );
 
         return ['deleted' => true];
     }
@@ -373,20 +442,7 @@ final class UserService
 
     private function countSkAccounts(int $organizationId): int
     {
-        $stmt = $this->pdo->prepare(
-            'SELECT COUNT(*) FROM organization_users ou
-             INNER JOIN users u ON u.id = ou.user_id
-             INNER JOIN roles r ON r.id = u.role_id
-             WHERE ou.organization_id = :org
-               AND ou.status = :membership
-               AND r.code = :role'
-        );
-        $stmt->execute([
-            'org' => $organizationId,
-            'membership' => 'active',
-            'role' => AuthService::ROLE_SK_OFFICIAL,
-        ]);
-        return (int) $stmt->fetchColumn();
+        return PlanLimits::count($this->pdo, 'accounts', $organizationId);
     }
 
     private function skOfficialRoleId(): int
@@ -402,7 +458,149 @@ final class UserService
 
     private function temporaryPassword(): string
     {
-        return 'YS-' . strtoupper(bin2hex(random_bytes(4)));
+        return 'Ys-' . bin2hex(random_bytes(4));
+    }
+
+    private function forgetRememberTokens(int $userId): void
+    {
+        if ($userId < 1) {
+            return;
+        }
+        (new RememberTokenStore(
+            dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'remember_tokens.json'
+        ))->forgetUser($userId);
+    }
+
+    /**
+     * The signed-in SK official's own profile. The user id comes from the session.
+     *
+     * @return array<string, mixed>
+     */
+    public function ownAccount(int $userId): array
+    {
+        return $this->presentOwnAccount($this->requireOwnAccount($userId));
+    }
+
+    /**
+     * @param array<string, mixed> $input
+     * @param array<string, mixed> $actor
+     * @return array<string, mixed>
+     */
+    public function updateOwnAccount(int $userId, array $input, array $actor = []): array
+    {
+        foreach ([
+            'id', 'user_id', 'userId', 'organization_id', 'organizationId', 'orgId', 'org_id',
+            'role', 'role_id', 'roleId', 'roleCode', 'status', 'youth_id', 'youthId',
+            'password', 'password_hash', 'passwordHash', 'currentPassword', 'current_password',
+            'newPassword', 'new_password', 'must_change_password', 'mustChangePassword',
+        ] as $blocked) {
+            unset($input[$blocked]);
+        }
+
+        $this->requireOwnAccount($userId);
+        $name = mb_substr(trim((string) ($input['name'] ?? '')), 0, 160);
+        if ($name === '' && (isset($input['firstName']) || isset($input['first_name']) || isset($input['lastName']) || isset($input['last_name']))) {
+            $first = mb_substr(trim((string) ($input['firstName'] ?? $input['first_name'] ?? '')), 0, 80);
+            $last = mb_substr(trim((string) ($input['lastName'] ?? $input['last_name'] ?? '')), 0, 80);
+            $name = trim($first . ' ' . $last);
+        }
+        $email = mb_strtolower(mb_substr(trim((string) ($input['email'] ?? '')), 0, 190));
+
+        $parts = preg_split('/\s+/', $name, 2) ?: [];
+        $firstName = mb_substr((string) ($parts[0] ?? ''), 0, 80);
+        $lastName = mb_substr(trim((string) ($parts[1] ?? '')), 0, 80);
+
+        $errors = [];
+        if ($firstName === '' || $lastName === '') {
+            $errors['name'] = 'Enter a first and last name.';
+        }
+        if ($email === '') {
+            $errors['email'] = 'An email address is required.';
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $errors['email'] = 'Enter a valid email address.';
+        }
+        if ($errors) {
+            Json::validation($errors);
+        }
+
+        $taken = $this->pdo->prepare('SELECT id FROM users WHERE email = :email AND id <> :id LIMIT 1');
+        $taken->execute(['email' => $email, 'id' => $userId]);
+        if ($taken->fetch() !== false) {
+            Json::error('CONFLICT', 'That email already has an account.', 409);
+        }
+
+        try {
+            $this->pdo->prepare(
+                'UPDATE users SET first_name = :first_name, last_name = :last_name, email = :email WHERE id = :id'
+            )->execute([
+                'first_name' => $firstName,
+                'last_name' => $lastName,
+                'email' => $email,
+                'id' => $userId,
+            ]);
+        } catch (PDOException $e) {
+            $sqlState = (string) ($e->errorInfo[0] ?? '');
+            $driverCode = (int) ($e->errorInfo[1] ?? 0);
+            if ($sqlState === '23000' || $driverCode === 1062) {
+                Json::error('CONFLICT', 'That email already has an account.', 409);
+            }
+            throw $e;
+        }
+
+        $organizationId = (int) ($actor['organization_id'] ?? 0);
+        if ($organizationId < 1) {
+            $org = $this->pdo->prepare(
+                'SELECT organization_id FROM organization_users WHERE user_id = :id AND status = :status ORDER BY is_owner DESC, id ASC LIMIT 1'
+            );
+            $org->execute(['id' => $userId, 'status' => 'active']);
+            $organizationId = (int) $org->fetchColumn();
+        }
+        if ($organizationId > 0) {
+            ActivityLog::recordSk(
+                $this->pdo,
+                $organizationId,
+                $actor,
+                'user.updated',
+                'user',
+                'Updated their account profile',
+                ['entityType' => 'user', 'entityId' => $userId]
+            );
+        }
+
+        return $this->presentOwnAccount($this->requireOwnAccount($userId));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function requireOwnAccount(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, email, first_name, last_name FROM users WHERE id = :id LIMIT 1'
+        );
+        $stmt->execute(['id' => $userId]);
+        $row = $stmt->fetch();
+        if ($row === false) {
+            Json::error('UNAUTHENTICATED', 'Authentication is required.', 401);
+        }
+        return $row;
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function presentOwnAccount(array $row): array
+    {
+        $first = (string) $row['first_name'];
+        $last = (string) $row['last_name'];
+        return [
+            'id' => (int) $row['id'],
+            'email' => (string) $row['email'],
+            'firstName' => $first,
+            'lastName' => $last,
+            'name' => trim($first . ' ' . $last),
+        ];
     }
 
     /**

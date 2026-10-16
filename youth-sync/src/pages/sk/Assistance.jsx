@@ -2,26 +2,31 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useStore } from '../../store.jsx';
 import { PageHeader } from '../../components/layouts.jsx';
-import { Badge, Confirm, Empty, Field, Section, Table, Tabs } from '../../components/ui.jsx';
+import { Badge, Confirm, Empty, Field, FormErrors, NeedsStoreData, Pagination, Section, Table, Tabs } from '../../components/ui.jsx';
 import { fullName, PRIORITY_DISCLAIMER, APPLICATION_STATUSES } from '../../data/mock.js';
 import RequirementsEditor from '../../components/requirements.jsx';
 import EligibilityFields from '../../components/eligibility.jsx';
 import SelectYouthPanel from '../../components/selection.jsx';
+import { mapAssistance } from '../../lib/mappers.js';
+import { pageSizesFor, useDebouncedValue, usePagedList } from '../../lib/usePagedList.js';
 
 const CATEGORY_LABEL = { scholarship: 'Scholarship', financial: 'Financial assistance', other: 'Other assistance' };
 
 export function AssistanceList() {
-  const { scoped, db, deleteAssistance } = useStore();
+  const { org, db, dataVersion } = useStore();
   const [tab, setTab] = useState('all');
-  const [query, setQuery] = useState('');
-  const all = scoped('assistance');
+  const [search, setSearch] = useState('');
+  const query = useDebouncedValue(search.trim(), 300);
 
-  const rows = all
-    .filter((a) => (tab === 'all' ? true : a.category === tab))
-    .filter((a) => a.name.toLowerCase().includes(query.toLowerCase()))
-    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id);
-
-  const count = (key) => (key === 'all' ? all.length : all.filter((a) => a.category === key).length);
+  // GET /sk/assistance: category tab, search (name, description) and paging on
+  // the server. `counts` gives every tab's total for the organization.
+  const list = usePagedList('/sk/assistance', {
+    category: tab === 'all' ? undefined : tab,
+    q: query || undefined,
+  }, { perPage: 25, enabled: dataVersion > 0, refreshKey: dataVersion, errorMessage: 'Unable to load assistance programs.' });
+  const rows = list.rows.map((row) => mapAssistance(row, org?.id));
+  const counts = list.data?.counts || {};
+  const count = (key) => (list.data ? Number(counts[key]) || 0 : undefined);
 
   return (
     <>
@@ -37,55 +42,94 @@ export function AssistanceList() {
       ]} />
 
       <div className="card mb-4 p-4">
-        <Field label="Search programs"><input className="field" value={query} onChange={(e) => setQuery(e.target.value)} /></Field>
+        <Field label="Search programs"><input className="field" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name or description" /></Field>
       </div>
 
-      {rows.length === 0 ? (
-        <Empty title="No assistance programs in this tab"
-          body="Create a scholarship, financial assistance, or a custom assistance program to start tracking beneficiaries.">
-          <Link to="/sk/assistance/new" className="btn btn-primary">New assistance program</Link>
+      {list.error ? (
+        <Empty title="Assistance programs could not be loaded" body={list.error}>
+          <button type="button" className="btn btn-primary" onClick={list.reload}>Retry</button>
         </Empty>
+      ) : !list.data ? (
+        <Empty title="Loading assistance programs" body="Fetching the latest programs from your organization." />
+      ) : rows.length === 0 ? (
+        query ? (
+          <Empty title="No results found" body="No assistance programs in this tab match your search.">
+            <button type="button" className="btn btn-ghost" onClick={() => setSearch('')}>Clear search</button>
+          </Empty>
+        ) : (
+          <Empty title="No assistance programs in this tab"
+            body="Create a scholarship, financial assistance, or a custom assistance program to start tracking beneficiaries.">
+            <Link to="/sk/assistance/new" className="btn btn-primary">New assistance program</Link>
+          </Empty>
+        )
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {rows.map((program) => {
-            const beneficiaries = db.beneficiaries.filter((b) => b.programId === program.id);
-  const applications = db.applications.filter((a) => a.targetType === 'assistance' && a.targetId === program.id);
-            const approved = beneficiaries.filter((b) => ['approved', 'released'].includes(b.status)).length;
-            return (
-              <Link key={program.id} to={`/sk/assistance/${program.id}`} className="card block p-5 hover:border-navy-600">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-sm font-semibold text-navy-900">{program.name}</h3>
-                    <p className="text-xs text-[#8391A4]">{CATEGORY_LABEL[program.category]}</p>
+        <>
+          {list.loading && <p className="mb-2 text-sm text-[#5A6C82]">Loading assistance programs…</p>}
+          <div className="grid gap-4 lg:grid-cols-2">
+            {rows.map((program) => {
+              // The list row carries this program's beneficiaries (GET /sk/assistance).
+              const beneficiaries = Array.isArray(program.beneficiaries)
+                ? program.beneficiaries
+                : db.beneficiaries.filter((b) => b.programId === program.id);
+              const approved = beneficiaries.filter((b) => ['approved', 'released'].includes(b.status)).length;
+              return (
+                <Link key={program.id} to={`/sk/assistance/${program.id}`} className="card block p-5 hover:border-navy-600">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-navy-900">{program.name}</h3>
+                      <p className="text-xs text-[#8391A4]">{CATEGORY_LABEL[program.category]}</p>
+                    </div>
+                    <Badge value={program.status} />
                   </div>
-                  <Badge value={program.status} />
-                </div>
-                <p className="mt-3 line-clamp-2 text-sm text-[#5A6C82]">{program.description || 'No description.'}</p>
-                <dl className="mt-4 grid grid-cols-3 gap-2 text-xs">
-                  <div><dt className="text-[#8391A4]">Slots filled</dt><dd className="font-semibold text-navy-900">{approved} / {program.slots || '∞'}</dd></div>
-                  <div><dt className="text-[#8391A4]">Deadline</dt><dd className="font-semibold text-navy-900">{program.deadline || '—'}</dd></div>
-                  <div><dt className="text-[#8391A4]">Applicants</dt><dd className="font-semibold text-navy-900">{beneficiaries.length}</dd></div>
-                </dl>
-              </Link>
-            );
-          })}
-        </div>
+                  <p className="mt-3 line-clamp-2 text-sm text-[#5A6C82]">{program.description || 'No description.'}</p>
+                  <dl className="mt-4 grid grid-cols-3 gap-2 text-xs">
+                    <div><dt className="text-[#8391A4]">Slots filled</dt><dd className="font-semibold text-navy-900">{approved} / {program.slots || '∞'}</dd></div>
+                    <div><dt className="text-[#8391A4]">Deadline</dt><dd className="font-semibold text-navy-900">{program.deadline || '—'}</dd></div>
+                    <div><dt className="text-[#8391A4]">Applicants</dt><dd className="font-semibold text-navy-900">{beneficiaries.length}</dd></div>
+                  </dl>
+                </Link>
+              );
+            })}
+          </div>
+          <Pagination page={list.page} pageSize={list.perPage} total={list.total} totalPages={list.totalPages}
+            onPage={list.setPage} loading={list.loading} noun="assistance programs"
+            pageSizes={pageSizesFor(25)} onPageSize={list.setPerPage} />
+        </>
       )}
     </>
   );
 }
 
+// Beneficiaries, requirements, applications and the youth picker.
+const ASSISTANCE_DETAIL_DATA = ['assistance', 'applications', 'youth'];
+
 export function AssistanceDetail() {
+  return <NeedsStoreData keys={ASSISTANCE_DETAIL_DATA}><AssistanceDetailView /></NeedsStoreData>;
+}
+
+function AssistanceDetailView() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { db, scoped, saveBeneficiary, removeBeneficiary, archiveAssistance } = useStore();
+  const { db, scoped, saveBeneficiary, removeBeneficiary, archiveAssistance, closeAssistance, mutating } = useStore();
   const program = db.assistance.find((a) => a.id === Number(id));
   const [form, setForm] = useState({ youthId: '', status: 'applied', remarks: '' });
 
   if (!program) return <Empty title="Program not found" body="That assistance program does not exist in this organization." />;
 
-  const beneficiaries = db.beneficiaries.filter((b) => b.programId === program.id);
-  const applications = db.applications.filter((a) => a.targetType === 'assistance' && a.targetId === program.id);
+  const youthOf = (youthId) => db.youth.find((y) => y.id === youthId);
+  const byNeed = (leftId, rightId) => {
+    const left = youthOf(leftId);
+    const right = youthOf(rightId);
+    const rank = (youth) => (youth?.level === 'High' ? 0 : youth?.level === 'Medium' ? 1 : 2);
+    const income = (youth) => (Number(youth?.familyIncome) > 0 ? Number(youth.familyIncome) : Number.MAX_SAFE_INTEGER);
+    return rank(left) - rank(right) || income(left) - income(right) || leftId - rightId;
+  };
+  const beneficiaries = db.beneficiaries
+    .filter((b) => b.programId === program.id)
+    .sort((a, b) => byNeed(a.youthId, b.youthId));
+  const applications = db.applications
+    .filter((a) => a.targetType === 'assistance' && a.targetId === program.id)
+    .sort((a, b) => byNeed(a.youthId, b.youthId));
   const approved = beneficiaries.filter((b) => ['approved', 'released'].includes(b.status)).length;
   const taken = new Set(beneficiaries.map((b) => b.youthId));
   const candidates = scoped('youth')
@@ -99,8 +143,16 @@ export function AssistanceDetail() {
         subtitle={`${CATEGORY_LABEL[program.category]} · ${approved} / ${program.slots || '∞'} slot(s) filled`}
         actions={<>
           <Link to={`/sk/assistance/${program.id}/edit`} className="btn btn-ghost">Edit</Link>
-          <Confirm className="btn btn-danger" message="Archive this assistance program?"
-            onConfirm={() => { archiveAssistance(program.id); navigate('/sk/assistance'); }}>Archive</Confirm>
+          {!['closed', 'archived'].includes(program.status) && (
+            <Confirm disabled={mutating} className="btn btn-accent" message="Mark this assistance program as done? Youth will no longer see it as open."
+              onConfirm={() => closeAssistance(program.id)}>
+              {mutating ? 'Saving...' : 'Mark as done'}
+            </Confirm>
+          )}
+          <Confirm disabled={mutating} className="btn btn-danger" message="Archive this assistance program?"
+            onConfirm={() => { archiveAssistance(program.id); navigate('/sk/assistance'); }}>
+            {mutating ? 'Saving...' : 'Archive'}
+          </Confirm>
           <Link to="/sk/assistance" className="btn btn-ghost">Back</Link>
         </>} />
 
@@ -124,13 +176,13 @@ export function AssistanceDetail() {
           </Section>
 
           <Section title="Applications for this program"
-            action={<Link to="/sk/applications" className="btn btn-ghost btn-sm">Open the review queue</Link>}>
+            action={<Link to={`/sk/applications?tab=${program.category === 'scholarship' ? 'scholarship' : 'assistance'}`} className="btn btn-ghost btn-sm">Open the review queue</Link>}>
             {applications.length === 0 ? (
               <p className="mt-3 text-sm text-[#7A889B]">No youth have applied through their accounts yet.</p>
             ) : (
               <div className="mt-3 space-y-2">
                 {applications.map((application) => {
-                  const youth = db.youth.find((y) => y.id === application.youthId);
+                  const youth = youthOf(application.youthId);
                   const submitted = db.submissions.filter((s) => s.applicationId === application.id).length;
                   const required = db.requirements.filter((r) => r.targetType === 'assistance' && r.targetId === program.id).length;
                   return (
@@ -138,7 +190,10 @@ export function AssistanceDetail() {
                       className="flex items-center justify-between rounded-lg border border-line px-3 py-2 hover:bg-shell">
                       <span>
                         <span className="block text-sm font-medium text-navy-900">{youth ? fullName(youth) : '—'}</span>
-                        <span className="block text-xs text-[#8391A4]">{submitted} / {required} requirement(s) submitted</span>
+                        <span className="block text-xs text-[#8391A4]">
+                          {youth?.familyIncome ? `₱${Number(youth.familyIncome).toLocaleString()}/month · ` : ''}
+                          {submitted} / {required} requirement(s) submitted
+                        </span>
                       </span>
                       <Badge value={APPLICATION_STATUSES[application.status]} />
                     </Link>
@@ -159,7 +214,7 @@ export function AssistanceDetail() {
                   <thead><tr><th className="th">Name</th><th className="th">Priority</th><th className="th">Status</th><th className="th">Awarded</th><th className="th" /></tr></thead>
                   <tbody>
                     {beneficiaries.map((record) => {
-                      const youth = db.youth.find((y) => y.id === record.youthId);
+                      const youth = youthOf(record.youthId);
                       return (
                         <tr key={record.id}>
                           <td className="td"><Link to={`/sk/youth/${youth?.id}`} className="font-medium text-navy-900 underline">{youth ? fullName(youth) : '—'}</Link></td>
@@ -181,7 +236,7 @@ export function AssistanceDetail() {
         </div>
 
         <aside className="space-y-4">
-          <SelectYouthPanel targetType="assistance" targetId={program.id} label={program.name} verb="approved"
+          <SelectYouthPanel targetType="assistance" targetId={program.id} label={program.name} verb="approved" orderByIncome
             alreadySelected={beneficiaries.filter((b) => ['approved', 'released'].includes(b.status)).map((b) => b.youthId)} />
 
           <form className="card space-y-4 p-5" onSubmit={(e) => {
@@ -217,11 +272,17 @@ const BLANK_REQUIREMENT = { name: '', description: '', required: true, accepts: 
 
 export function AssistanceForm() {
   const { id } = useParams();
+  return <NeedsStoreData keys={id ? ['types', 'assistance'] : ['types']}><AssistanceFormView /></NeedsStoreData>;
+}
+
+function AssistanceFormView() {
+  const { id } = useParams();
   const navigate = useNavigate();
-  const { db, types, saveAssistance, addType } = useStore();
+  const { db, types, saveAssistance, addType, mutating } = useStore();
   const existing = id ? db.assistance.find((a) => a.id === Number(id)) : null;
   const [values, setValues] = useState(existing ? { ...existing } : EMPTY);
   const [newType, setNewType] = useState({ name: '', category: 'other', requirements: [{ ...BLANK_REQUIREMENT }] });
+  const [errors, setErrors] = useState({});
 
   const set = (key) => (e) => setValues((v) => ({ ...v, [key]: e.target.value }));
   const selectedType = types.find((x) => x.id === Number(values.typeId));
@@ -237,10 +298,18 @@ export function AssistanceForm() {
       <div className="grid gap-4 lg:grid-cols-3">
         <form className="card space-y-4 p-5 lg:col-span-2" onSubmit={async (e) => {
           e.preventDefault();
-          const savedId = await saveAssistance(values);
-          if (savedId) navigate(`/sk/assistance/${savedId}`);
+          if (mutating) return;
+          setErrors({});
+          try {
+            const savedId = await saveAssistance(values);
+            if (savedId) navigate(`/sk/assistance/${savedId}`);
+          } catch (err) {
+            const fields = err?.fields && typeof err.fields === 'object' ? err.fields : {};
+            setErrors({ ...fields, form: err?.message || 'Could not save this assistance program.' });
+          }
         }}>
-          <Field label="Program name *"><input className="field" value={values.name} onChange={set('name')} required /></Field>
+          <FormErrors errors={errors} />
+          <Field label="Program name *" error={errors.name}><input className="field" value={values.name} onChange={set('name')} required /></Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Category *">
               <select className="field" value={values.category} onChange={set('category')}>
@@ -292,7 +361,9 @@ export function AssistanceForm() {
           <div className="pt-1"><EligibilityFields values={values} onChange={setValues} /></div>
 
           <div className="flex gap-3 pt-1">
-            <button type="submit" className="btn btn-primary">{existing ? 'Save changes' : 'Create program'}</button>
+            <button type="submit" className="btn btn-primary" disabled={mutating}>
+              {mutating ? (existing ? 'Saving...' : 'Creating...') : (existing ? 'Save changes' : 'Create program')}
+            </button>
             <button type="button" className="btn btn-ghost" onClick={() => navigate('/sk/assistance')}>Cancel</button>
           </div>
         </form>

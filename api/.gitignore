@@ -1,9 +1,11 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 /logs/*.log
 /uploads/*
 /storage/remember_tokens.json
+/storage/backups/*
 !uploads/.gitkeep
 !logs/.gitkeep
 !storage/.gitkeep

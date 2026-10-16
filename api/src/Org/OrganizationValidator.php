@@ -100,7 +100,7 @@ final class OrganizationValidator
         if ($requirePassword && $values['ownerPassword'] === '') {
             $errors['ownerPassword'] = 'A password is required.';
         } elseif ($values['ownerPassword'] !== '' && !Password::isValidNew($values['ownerPassword'])) {
-            $errors['ownerPassword'] = 'Password must be at least 8 characters.';
+            $errors['ownerPassword'] = Password::RULE;
         }
 
         return $errors;
@@ -132,6 +132,10 @@ final class OrganizationValidator
         ]);
         if ($stmt->fetch() !== false) {
             return ['code' => 'CONFLICT', 'message' => 'That barangay and municipality already has an SK organization.'];
+        }
+
+        if (\YouthSync\Identity\ContactIdentity::organizationContactTaken($pdo, $values['contact'])) {
+            return ['code' => 'CONFLICT', 'message' => \YouthSync\Identity\ContactIdentity::CONTACT_MESSAGE];
         }
 
         $stmt = $pdo->prepare('SELECT id FROM users WHERE email = :email LIMIT 1');

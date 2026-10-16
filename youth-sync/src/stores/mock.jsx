@@ -91,6 +91,7 @@ export function MockStoreProvider({ children }) {
   const accountStatusOf = (youth) => {
     const account = accountFor(youth);
     if (!account) return 'not_registered';
+    if (account.mustChangePassword) return 'password_pending';
     return account.active ? 'active' : 'inactive';
   };
 
@@ -175,7 +176,7 @@ export function MockStoreProvider({ children }) {
       if (found.role === 'youth' && !found.verified) {
         return { error: 'This account is not verified yet. Finish OTP verification to continue.' };
       }
-      if (found.role === 'sk_official') {
+      if (found.role === 'sk_official' || found.role === 'system_admin') {
         return { error: 'Those credentials do not match our records.' };
       }
       setUserId(found.id);
@@ -297,8 +298,8 @@ export function MockStoreProvider({ children }) {
 
     /** First login after the SK hands over a temporary password. */
     changePassword(newPassword) {
-      if (String(newPassword || '').length < 8) {
-        notify('Use a password of at least 8 characters.', 'warning');
+      if (!/[A-Z]/.test(String(newPassword || '')) || !/[a-z]/.test(String(newPassword || '')) || String(newPassword || '').length < 8) {
+        notify('Use at least 8 characters, with 1 capital letter and 1 lowercase letter.', 'warning');
         return false;
       }
       // `user` is derived from `users`, so updating the list is enough.
@@ -401,20 +402,6 @@ export function MockStoreProvider({ children }) {
     toggleUser(id) { actions.toggleUserActive(id); },
     saveStaff(values) { actions.saveUser({ ...values, role: 'sk_official' }); },
     removeStaff(id) { actions.deleteUser(id); },
-
-    // ---- requirements ---------------------------------------------------
-    addRequirement(targetType, targetId, values) {
-      prepend('requirements', { ...values, id: newId(), orgId: org.id, targetType, targetId });
-      notify(`Requirement "${values.name}" added.`);
-    },
-    updateRequirement(id, values) {
-      patch('requirements', (rows) => rows.map((r) => (r.id === id ? { ...r, ...values } : r)));
-      notify('Requirement updated.');
-    },
-    removeRequirement(id) {
-      patch('requirements', (rows) => rows.filter((r) => r.id !== id));
-      notify('Requirement removed.');
-    },
 
     // ---- applications ---------------------------------------------------
     apply(targetType, targetId) {

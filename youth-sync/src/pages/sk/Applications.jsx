@@ -1,49 +1,52 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useStore } from '../../store.jsx';
 import { PageHeader } from '../../components/layouts.jsx';
-import { Badge, ConfirmButton, Empty, Field, Modal, Section, Stat, Table, Tabs } from '../../components/ui.jsx';
-import { FilterBar, SORT_NEWEST, sortRows } from '../../components/filters.jsx';
+import { Badge, Empty, Field, Modal, NeedsStoreData, Pagination, Section, Stat, Table, Tabs } from '../../components/ui.jsx';
+import { FilterBar, SORT_NEWEST } from '../../components/filters.jsx';
 import { age, fullName, APPLICATION_STATUSES, REQUIREMENT_STATUSES } from '../../data/mock.js';
+import { api, apiBlob, friendlyApiMessage } from '../../lib/api.js';
+import { mapApplication } from '../../lib/mappers.js';
+import { pageSizesFor, useDebouncedValue, usePagedList } from '../../lib/usePagedList.js';
 
 export function ApplicationQueue() {
-  const { scoped, db, targetOf } = useStore();
+  const { org, db, targetOf, dataVersion } = useStore();
   // The sidebar links here with ?tab=scholarship / ?tab=assistance, so the kind
   // filter reads from the URL and stays in step with navigation.
   const [params, setParams] = useSearchParams();
   const kind = params.get('tab') || 'all';
   const [filter, setFilter] = useState('all');
-  const [query, setQuery] = useState('');
+  const [search, setSearch] = useState('');
+  const query = useDebouncedValue(search.trim(), 300);
   const [sort, setSort] = useState('newest');
+  const assistanceQueue = kind === 'scholarship' || kind === 'assistance';
 
-  const all = scoped('applications').filter((a) => {
-    if (kind === 'all') return true;
-    if (kind === 'assistance') return a.targetType === 'assistance' && targetOf(a)?.category !== 'scholarship';
-    if (kind === 'scholarship') return targetOf(a)?.category === 'scholarship';
-    return true;
-  });
-
-  const filtered = all
-    .filter((a) => (filter === 'all' ? true : a.status === filter))
-    .filter((a) => {
-      if (!query) return true;
-      const youth = db.youth.find((y) => y.id === a.youthId);
-      const target = targetOf(a);
-      return `${youth ? fullName(youth) : ''} ${target?.name || ''}`.toLowerCase().includes(query.toLowerCase());
-    });
-
-  const rows = sortRows(filtered, sort, (a) => {
-    const youth = db.youth.find((y) => y.id === a.youthId);
-    return youth ? youth.lastName : '';
-  });
-
-  const count = (key) => (key === 'all' ? all.length : all.filter((a) => a.status === key).length);
-  const kindLabel = { all: 'Applications', scholarship: 'Scholarship applications', assistance: 'Assistance applications' }[kind];
+  // GET /sk/applications: kind, status tab, search (youth name, assistance or
+  // program name), sort and paging on the server. `counts` holds the status
+  // tab totals for the selected kind.
+  const list = usePagedList('/sk/applications', {
+    kind: kind === 'all' ? undefined : kind,
+    status: filter === 'all' ? undefined : filter,
+    q: query || undefined,
+    sort: assistanceQueue ? undefined : sort,
+  }, { perPage: 25, enabled: dataVersion > 0, refreshKey: dataVersion, errorMessage: 'Unable to load applications.' });
+  const rows = list.rows.map((row) => ({
+    ...mapApplication(row, org?.id),
+    program: row.program || null,
+    submissions: Array.isArray(row.submissions) ? row.submissions : null,
+    requirementCount: Number.isFinite(Number(row.requirementCount)) ? Number(row.requirementCount) : null,
+  }));
+  const counts = list.data?.counts || {};
+  const count = (key) => (list.data ? Number(counts[key]) || 0 : undefined);
+  const statValue = (key) => (list.data ? count(key) : '…');
+  const kindLabel = { all: 'Applications', scholarship: 'Scholarship applications', assistance: 'Assistance applications' }[kind] || 'Applications';
+  const filtered = Boolean(query || filter !== 'all');
+  const reset = () => { setSearch(''); setFilter('all'); setSort('newest'); };
 
   return (
     <>
       <PageHeader title={kindLabel}
-        subtitle={`${all.length} application(s)${kind === 'all' ? ' across events, programs, scholarships and assistance' : ''}`} />
+        subtitle={`${list.data ? count('all') : '…'} application(s)${kind === 'all' ? ' across events, programs, scholarships and assistance' : ''}`} />
 
       <div className="mb-4 flex flex-wrap gap-2">
         {[['all', 'All'], ['scholarship', 'Scholarships'], ['assistance', 'Assistance']].map(([key, label]) => (
@@ -57,10 +60,10 @@ export function ApplicationQueue() {
       </div>
 
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Awaiting review" value={count('pending')} />
-        <Stat label="Approved" value={count('approved')} />
-        <Stat label="Needs resubmission" value={count('needs_resubmission')} />
-        <Stat label="Rejected" value={count('rejected')} />
+        <Stat label="Awaiting review" value={statValue('pending')} />
+        <Stat label="Approved" value={statValue('approved')} />
+        <Stat label="Needs resubmission" value={statValue('needs_resubmission')} />
+        <Stat label="Rejected" value={statValue('rejected')} />
       </div>
 
       <Tabs active={filter} onSelect={setFilter} items={[
@@ -68,46 +71,77 @@ export function ApplicationQueue() {
         ...Object.entries(APPLICATION_STATUSES).map(([key, label]) => ({ key, label, count: count(key) })),
       ]} />
 
-      <FilterBar search={query} onSearch={setQuery}
+      <FilterBar search={search} onSearch={setSearch}
         placeholder="Youth name or opportunity"
-        sort={{ value: sort, onChange: setSort, options: SORT_NEWEST }}
-        onReset={() => { setQuery(''); setFilter('all'); setSort('newest'); }} />
+        sort={assistanceQueue ? undefined : { value: sort, onChange: setSort, options: SORT_NEWEST }}
+        onReset={reset} />
 
-      {rows.length === 0 ? (
-        <Empty title="No applications in this tab" body="Applications appear here as soon as youth apply from their accounts." />
+      {list.error ? (
+        <Empty title="Applications could not be loaded" body={list.error}>
+          <button type="button" className="btn btn-primary" onClick={list.reload}>Retry</button>
+        </Empty>
+      ) : !list.data ? (
+        <Empty title="Loading applications" body="Fetching the latest applications from your organization." />
+      ) : rows.length === 0 ? (
+        filtered ? (
+          <Empty title="No results found" body="No applications match this search or this status.">
+            <button type="button" className="btn btn-ghost" onClick={reset}>Reset filters</button>
+          </Empty>
+        ) : (
+          <Empty title="No applications in this tab" body="Applications appear here as soon as youth apply from their accounts." />
+        )
       ) : (
-        <Table head={['Youth', 'Applied for', 'Type', 'Requirements', 'Submitted', 'Status', '']} minWidth={880}>
-          {rows.map((application) => {
-            const youth = db.youth.find((y) => y.id === application.youthId);
-            const target = targetOf(application);
-            const reqs = db.requirements.filter((r) => r.targetType === application.targetType && r.targetId === application.targetId);
-            const subs = db.submissions.filter((s) => s.applicationId === application.id);
-            return (
-              <tr key={application.id} className="hover:bg-shell">
-                <td className="td">
-                  <span className="font-medium text-navy-900">{youth ? fullName(youth) : '—'}</span>
-                  {youth && <span className="block text-xs text-[#8391A4]">{age(youth.birthDate)} years old · {youth.level} priority</span>}
-                </td>
-                <td className="td">{target?.name || '—'}</td>
-                <td className="td">{application.targetType === 'assistance' ? 'Assistance' : 'Event / programme'}</td>
-                <td className="td">{subs.length} / {reqs.length}</td>
-                <td className="td">{application.submittedAt}</td>
-                <td className="td"><Badge value={APPLICATION_STATUSES[application.status]} /></td>
-                <td className="td"><Link to={`/sk/applications/${application.id}`} className="btn btn-ghost btn-sm">Review</Link></td>
-              </tr>
-            );
-          })}
-        </Table>
+        <>
+          {list.loading && <p className="mb-2 text-sm text-[#5A6C82]">Loading applications…</p>}
+          <Table head={['Youth', 'Applied for', 'Type', 'Requirements', 'Submitted', 'Status', '']} minWidth={880}>
+            {rows.map((application) => {
+              // The list row carries the youth and target summary; the store copy
+              // fills in anything the summary lacks (e.g. birth date for age).
+              const youth = db.youth.find((y) => y.id === application.youthId) || application.youth;
+              const target = targetOf(application) || application.assistance || application.program;
+              // Counts come with the row (GET /sk/applications); the store copy is a fallback.
+              const reqCount = application.requirementCount ?? db.requirements
+                .filter((r) => r.targetType === application.targetType && r.targetId === application.targetId).length;
+              const subCount = application.submissions
+                ? application.submissions.length
+                : db.submissions.filter((s) => s.applicationId === application.id).length;
+              return (
+                <tr key={application.id} className="hover:bg-shell">
+                  <td className="td">
+                    <span className="font-medium text-navy-900">{youth ? fullName(youth) : '—'}</span>
+                    {youth && <span className="block text-xs text-[#8391A4]">{youth.birthDate ? `${age(youth.birthDate)} years old · ` : ''}{youth.level} priority</span>}
+                  </td>
+                  <td className="td">{target?.name || '—'}</td>
+                  <td className="td">{application.targetType === 'assistance' ? 'Assistance' : 'Event / programme'}</td>
+                  <td className="td">{subCount} / {reqCount}</td>
+                  <td className="td">{application.submittedAt}</td>
+                  <td className="td"><Badge value={APPLICATION_STATUSES[application.status]} /></td>
+                  <td className="td"><Link to={`/sk/applications/${application.id}`} className="btn btn-ghost btn-sm">Review</Link></td>
+                </tr>
+              );
+            })}
+          </Table>
+          <Pagination page={list.page} pageSize={list.perPage} total={list.total} totalPages={list.totalPages}
+            onPage={list.setPage} loading={list.loading} noun="applications"
+            pageSizes={pageSizesFor(25)} onPageSize={list.setPerPage} />
+        </>
       )}
     </>
   );
 }
 
+// The application with its youth, target and requirement files.
+const APPLICATION_REVIEW_DATA = ['applications', 'youth', 'programs', 'assistance'];
+
 export function ApplicationReview() {
+  return <NeedsStoreData keys={APPLICATION_REVIEW_DATA}><ApplicationReviewView /></NeedsStoreData>;
+}
+
+function ApplicationReviewView() {
   const { id } = useParams();
   const {
     db, targetOf, requirementsFor, submissionsFor, reviewRequirement,
-    approveApplication, rejectApplication, requestResubmission,
+    approveApplication, rejectApplication, requestResubmission, mutating,
   } = useStore();
   const [notes, setNotes] = useState({});
   const [rejecting, setRejecting] = useState(false);
@@ -115,14 +149,53 @@ export function ApplicationReview() {
   const [reason, setReason] = useState('');
   const [note, setNote] = useState('');
   const [picked, setPicked] = useState([]);
+  const [fileBusy, setFileBusy] = useState('');
+  const [fileError, setFileError] = useState('');
 
-  const application = db.applications.find((a) => a.id === Number(id));
+  const openFile = async (requirementId, filename, download) => {
+    setFileError('');
+    setFileBusy(`${requirementId}:${download ? 'download' : 'view'}`);
+    try {
+      const blob = await apiBlob(`/sk/applications/${id}/requirements/${requirementId}/file${download ? '?download=1' : ''}`);
+      const url = URL.createObjectURL(blob);
+      if (download) {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename || 'document';
+        link.click();
+      } else {
+        window.open(url, '_blank', 'noopener');
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      setFileError(friendlyApiMessage(err, 'The document could not be opened.'));
+    } finally {
+      setFileBusy('');
+    }
+  };
+
+  const cached = db.applications.find((a) => Number(a.id) === Number(id));
+  const [fetched, setFetched] = useState(null);
+  const [missing, setMissing] = useState(false);
+  useEffect(() => {
+    if (cached) return undefined;
+    let cancel = false;
+    setFetched(null);
+    setMissing(false);
+    api.get(`/sk/applications/${id}`)
+      .then((row) => { if (!cancel) setFetched({ ...mapApplication(row), submissions: row.submissions || [] }); })
+      .catch(() => { if (!cancel) setMissing(true); });
+    return () => { cancel = true; };
+  }, [id, cached]);
+
+  const application = cached || fetched;
+  if (!application && !missing) return <Empty title="Loading application" body="Fetching this application from your organization." />;
   if (!application) return <Empty title="Application not found" body="That application is not on file for your organization." />;
 
   const youth = db.youth.find((y) => y.id === application.youthId);
   const target = targetOf(application);
   const reqs = requirementsFor(application.targetType, application.targetId);
-  const subs = submissionsFor(application.id);
+  const subs = cached ? submissionsFor(application.id) : (fetched?.submissions || []);
 
   return (
     <>
@@ -172,30 +245,40 @@ export function ApplicationReview() {
                         <p className="mt-3 text-sm text-[#7A889B]">Not submitted yet.</p>
                       ) : (
                         <>
-                          <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-shell p-3">
-                            {submission.dataUrl && submission.fileType?.startsWith('image/') ? (
-                              <a href={submission.dataUrl} target="_blank" rel="noreferrer">
-                                <img src={submission.dataUrl} alt={submission.fileName} className="h-16 w-16 rounded-lg border border-line object-cover" />
-                              </a>
-                            ) : (
-                              <span className="grid h-16 w-16 place-items-center rounded-lg border border-line bg-white text-[10px] font-semibold text-[#5A6C82]">
-                                {submission.dataUrl ? 'FILE' : 'NO PREVIEW'}
-                              </span>
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm font-medium text-navy-900">{submission.fileName}</p>
-                              <p className="text-xs text-[#8391A4]">Submitted {submission.submittedAt}</p>
+                          {submission.fileName ? (
+                            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-shell p-3">
+                              <span className="text-sm" aria-hidden="true">📎</span>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium text-navy-900">{submission.fileName}</p>
+                                <p className="text-xs text-[#8391A4]">{REQUIREMENT_STATUSES[status] || status}</p>
+                              </div>
+                              <button type="button" className="btn btn-ghost btn-sm" disabled={fileBusy !== ''}
+                                onClick={() => openFile(requirement.id, submission.fileName, false)}>
+                                {fileBusy === `${requirement.id}:view` ? 'Opening...' : 'View'}
+                              </button>
+                              <button type="button" className="btn btn-ghost btn-sm" disabled={fileBusy !== ''}
+                                onClick={() => openFile(requirement.id, submission.fileName, true)}>
+                                {fileBusy === `${requirement.id}:download` ? 'Downloading...' : 'Download'}
+                              </button>
                             </div>
-                          </div>
+                          ) : (
+                            <p className="mt-3 text-sm text-[#7A889B]">No document uploaded yet.</p>
+                          )}
+                          {fileError && <p className="mt-2 text-sm text-[#96201A]">{fileError}</p>}
 
                           <div className="mt-3 flex flex-wrap items-end gap-2">
                             <div className="min-w-[200px] flex-1">
                               <input className="field" placeholder="Note to the youth (used when rejecting)"
                                 value={notes[submission.id] || ''} onChange={(e) => setNotes({ ...notes, [submission.id]: e.target.value })} />
                             </div>
-                            <button type="button" className="btn btn-ghost btn-sm" onClick={() => reviewRequirement(submission.id, 'verified')}>Verify</button>
-                            <button type="button" className="btn btn-danger btn-sm"
-                              onClick={() => reviewRequirement(submission.id, 'needs_resubmission', notes[submission.id] || '')}>Needs resubmission</button>
+                            <button type="button" className="btn btn-ghost btn-sm" disabled={mutating}
+                              onClick={() => reviewRequirement(submission.id, 'verified')}>
+                              {mutating ? 'Saving...' : 'Verify'}
+                            </button>
+                            <button type="button" className="btn btn-danger btn-sm" disabled={mutating}
+                              onClick={() => reviewRequirement(submission.id, 'needs_resubmission', notes[submission.id] || '')}>
+                              {mutating ? 'Saving...' : 'Needs resubmission'}
+                            </button>
                           </div>
                         </>
                       )}
@@ -215,11 +298,10 @@ export function ApplicationReview() {
             )}
 
             <div className="mt-4 grid gap-2">
-              <ConfirmButton className="btn btn-accent w-full" tone="btn btn-accent"
-                label="Approve" title="Approve this application?"
-                description={`${youth ? fullName(youth) : 'This youth'} will be notified that ${target?.name} was approved.`}
-                confirmLabel="Confirm approval"
-                onConfirm={() => approveApplication(application.id)} />
+              <button type="button" className="btn btn-accent w-full" disabled={mutating}
+                onClick={() => approveApplication(application.id)}>
+                {mutating ? 'Saving...' : 'Approve'}
+              </button>
 
               <button type="button" className="btn btn-danger w-full" onClick={() => setRejecting(true)}>Reject</button>
               <button type="button" className="btn btn-ghost w-full" onClick={() => setResubmitting(true)}>Request resubmission</button>

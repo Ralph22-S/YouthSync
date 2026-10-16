@@ -30,7 +30,7 @@ final class ProgramController
     public function store(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->programs->create($ctx['organization_id'], Json::readBody(), $ctx['membership']), 201);
+        Json::success($this->programs->create($ctx['organization_id'], Json::readBody(), $ctx['membership'], null, $ctx['user']), 201);
     }
 
     public function update(array $params): void
@@ -40,14 +40,16 @@ final class ProgramController
             $ctx['organization_id'],
             (int) $params['id'],
             Json::readBody(),
-            $ctx['membership']
+            $ctx['membership'],
+            null,
+            $ctx['user']
         ));
     }
 
     public function destroy(array $params): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        $this->programs->delete($ctx['organization_id'], (int) $params['id']);
+        $this->programs->delete($ctx['organization_id'], (int) $params['id'], null, $ctx['user']);
         Json::success(['deleted' => true]);
     }
 
@@ -60,8 +62,20 @@ final class ProgramController
             $ctx['organization_id'],
             (int) $params['id'],
             $status,
-            $ctx['membership']
+            $ctx['membership'],
+            $ctx['user']
         ));
+    }
+
+    public function invite(array $params): void
+    {
+        $ctx = $this->guard->requireSkOfficial();
+        $body = Json::readBody();
+        $ids = $body['youthIds'] ?? $body['youth_ids'] ?? [];
+        if (!is_array($ids)) {
+            Json::validation(['youthIds' => 'Select at least one youth.']);
+        }
+        Json::success($this->programs->invite($ctx['organization_id'], (int) $params['id'], $ids, $ctx['user']));
     }
 
     public function archive(array $params): void
@@ -71,7 +85,8 @@ final class ProgramController
             $ctx['organization_id'],
             (int) $params['id'],
             'archived',
-            $ctx['membership']
+            $ctx['membership'],
+            $ctx['user']
         ));
     }
 
@@ -84,7 +99,7 @@ final class ProgramController
     public function eventStore(array $params = []): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        Json::success($this->programs->create($ctx['organization_id'], Json::readBody(), $ctx['membership'], 'event'), 201);
+        Json::success($this->programs->create($ctx['organization_id'], Json::readBody(), $ctx['membership'], 'event', $ctx['user']), 201);
     }
 
     public function eventShow(array $params): void
@@ -101,14 +116,15 @@ final class ProgramController
             (int) $params['id'],
             Json::readBody(),
             $ctx['membership'],
-            'event'
+            'event',
+            $ctx['user']
         ));
     }
 
     public function eventDestroy(array $params): void
     {
         $ctx = $this->guard->requireSkOfficial();
-        $this->programs->delete($ctx['organization_id'], (int) $params['id'], 'event');
+        $this->programs->delete($ctx['organization_id'], (int) $params['id'], 'event', $ctx['user']);
         Json::success(['deleted' => true]);
     }
 
@@ -123,6 +139,6 @@ final class ProgramController
     {
         $ctx = $this->guard->requireSkOfficial();
         $this->programs->get($ctx['organization_id'], (int) $params['id']);
-        Json::success($this->programs->create($ctx['organization_id'], Json::readBody(), $ctx['membership'], 'event'), 201);
+        Json::success($this->programs->create($ctx['organization_id'], Json::readBody(), $ctx['membership'], 'event', $ctx['user']), 201);
     }
 }

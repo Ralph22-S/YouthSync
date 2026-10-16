@@ -10,38 +10,36 @@ require dirname(__DIR__) . '/config/config.php';
 require dirname(__DIR__) . '/config/database.php';
 
 $pdo = youthsync_pdo();
-$leftoverA = $pdo->query(
-    "SELECT id FROM assistance_programs WHERE name LIKE 'PhaseSix Test%'"
-)->fetchAll();
-$leftoverY = $pdo->query(
-    "SELECT id FROM youth WHERE first_name = 'PhaseSix' AND last_name LIKE 'Test%'"
-)->fetchAll();
-$leftoverApp = $pdo->query(
-    "SELECT id FROM applications WHERE remarks LIKE 'PhaseSix%'"
-)->fetchAll();
-if ($leftoverA || $leftoverY || $leftoverApp) {
-    fwrite(STDERR, "STOP: pre-existing PhaseSix test records found. No cleanup was performed.\n");
-    exit(2);
-}
+$base = 'http://localhost/YouthSync/api';
+$stamp = date('YmdHis');
+$prefix = "AppHttp {$stamp}";
+$failures = 0;
+$programIds = [];
+$applicationIds = [];
+$otherUser = null;
+$otherHash = null;
+$otherMustChange = null;
 
-$base = 'http://localhost/YouthSync_UI_Refresh/api';
-$counts = static function () use ($pdo): array {
-    return [
-        'users' => (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn(),
-        'orgs' => (int) $pdo->query('SELECT COUNT(*) FROM organizations')->fetchColumn(),
-        'youth' => (int) $pdo->query('SELECT COUNT(*) FROM youth')->fetchColumn(),
-        'programs' => (int) $pdo->query('SELECT COUNT(*) FROM programs')->fetchColumn(),
-        'attendance' => (int) $pdo->query('SELECT COUNT(*) FROM attendance')->fetchColumn(),
-        'assistance' => (int) $pdo->query('SELECT COUNT(*) FROM assistance_programs')->fetchColumn(),
-        'beneficiaries' => (int) $pdo->query('SELECT COUNT(*) FROM beneficiaries')->fetchColumn(),
-        'applications' => (int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn(),
-        'submissions' => (int) $pdo->query('SELECT COUNT(*) FROM application_submissions')->fetchColumn(),
-    ];
+$ids = static function (string $table) use ($pdo): array {
+    $rows = $pdo->query("SELECT id FROM {$table} ORDER BY id")->fetchAll(PDO::FETCH_COLUMN);
+    return array_map('intval', $rows ?: []);
 };
-$before = $counts();
 
-function req(string $name, string $method, string $url, ?string $json, string $cookie): array
-{
+$beforeApplications = $ids('applications');
+$beforePrograms = $ids('assistance_programs');
+$beforeBeneficiaries = $ids('beneficiaries');
+$beforeSubmissions = $ids('application_submissions');
+
+$check = static function (string $name, bool $ok, string $detail = '') use (&$failures): void {
+    if ($ok) {
+        echo "PASS {$name}\n";
+        return;
+    }
+    $failures++;
+    echo "FAIL {$name}" . ($detail !== '' ? " {$detail}" : '') . "\n";
+};
+
+$req = static function (string $method, string $url, ?string $json, string $cookie): array {
     $ch = curl_init($url);
     $headers = ['Accept: application/json'];
     curl_setopt_array($ch, [
@@ -50,7 +48,7 @@ function req(string $name, string $method, string $url, ?string $json, string $c
         CURLOPT_HEADER => true,
         CURLOPT_COOKIEJAR => $cookie,
         CURLOPT_COOKIEFILE => $cookie,
-        CURLOPT_TIMEOUT => 20,
+        CURLOPT_TIMEOUT => 25,
     ]);
     if ($json !== null) {
         $headers[] = 'Content-Type: application/json';
@@ -61,377 +59,305 @@ function req(string $name, string $method, string $url, ?string $json, string $c
     if ($raw === false) {
         $err = curl_error($ch);
         curl_close($ch);
-        return ['name' => $name, 'status' => 0, 'body' => $err];
+        return ['status' => 0, 'body' => $err];
     }
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $body = substr($raw, $headerSize);
     curl_close($ch);
-    return ['name' => $name, 'status' => $status, 'body' => $body];
-}
+    return ['status' => $status, 'body' => substr($raw, $headerSize)];
+};
 
-function payload(array $t): array
-{
-    $decoded = json_decode($t['body'], true);
-    return is_array($decoded) ? $decoded : [];
-}
+$data = static function (array $response): array {
+    $decoded = json_decode($response['body'], true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+    $payload = $decoded['data'] ?? $decoded;
+    return is_array($payload) ? $payload : [];
+};
 
-$sk1 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p6_sk1.txt';
-$sk2 = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p6_sk2.txt';
-$empty = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ys_p6_empty.txt';
-foreach ([$sk1, $sk2, $empty] as $f) {
-    @unlink($f);
-}
+$detail = static function (array $response): string {
+    return 'status=' . $response['status'] . ' body=' . substr($response['body'], 0, 400);
+};
 
-$login = static fn (string $email): string => json_encode(['email' => $email, 'password' => 'YouthSync1!']);
-$youthIds = [];
-$assistIds = [];
-$appIds = [];
-$benIds = [];
-$subIds = [];
-$tests = [];
-$expect = [];
+$login = static function (string $email, string $password, string $cookie) use ($req, $base): array {
+    return $req('POST', "$base/auth/login", json_encode([
+        'email' => $email,
+        'password' => $password,
+    ]), $cookie);
+};
 
-$tests[] = req('unauth_applications', 'GET', "$base/sk/applications", null, $empty);
-$expect['unauth_applications'] = [401];
+$containsId = static function (array $response, int $id) use ($data): bool {
+    foreach (($data($response)['items'] ?? []) as $item) {
+        if ((int) ($item['id'] ?? 0) === $id) {
+            return true;
+        }
+    }
+    return false;
+};
 
-$tests[] = req('login_sk1', 'POST', "$base/auth/login", $login('sk1@demo.test'), $sk1);
-$expect['login_sk1'] = [200];
-$tests[] = req('phase1_me', 'GET', "$base/auth/me", null, $sk1);
-$expect['phase1_me'] = [200];
-$tests[] = req('phase2_youth', 'GET', "$base/sk/youth", null, $sk1);
-$expect['phase2_youth'] = [200];
-$tests[] = req('phase3_programs', 'GET', "$base/sk/programs", null, $sk1);
-$expect['phase3_programs'] = [200];
-$tests[] = req('phase5_assistance', 'GET', "$base/sk/assistance", null, $sk1);
-$expect['phase5_assistance'] = [200];
-$tests[] = req('list_applications', 'GET', "$base/sk/applications", null, $sk1);
-$expect['list_applications'] = [200];
+$cookie = static function (string $name): string {
+    return sys_get_temp_dir() . DIRECTORY_SEPARATOR . $name . '.txt';
+};
 
-$youthBody = static fn (string $last, string $birth, string $contact): string => json_encode([
-    'firstName' => 'PhaseSix',
-    'lastName' => $last,
-    'birthDate' => $birth,
-    'address' => 'Phase 6 test address',
-    'contact' => $contact,
-    'interests' => ['Education & training'],
-    'organization_id' => 9,
-]);
-
-$y1 = req('create_youth_a', 'POST', "$base/sk/youth", $youthBody('TestA', '2005-01-01', '09170006601'), $sk1);
-$tests[] = $y1;
-$expect['create_youth_a'] = [201];
-$youthA = (int) (payload($y1)['data']['youth']['id'] ?? 0);
-if ($youthA) {
-    $youthIds[] = $youthA;
-}
-$y2 = req('create_youth_b', 'POST', "$base/sk/youth", $youthBody('TestB', '2004-02-02', '09170006602'), $sk1);
-$tests[] = $y2;
-$expect['create_youth_b'] = [201];
-$youthB = (int) (payload($y2)['data']['youth']['id'] ?? 0);
-if ($youthB) {
-    $youthIds[] = $youthB;
-}
-$y3 = req('create_youth_c', 'POST', "$base/sk/youth", $youthBody('TestC', '2003-03-03', '09170006603'), $sk1);
-$tests[] = $y3;
-$expect['create_youth_c'] = [201];
-$youthC = (int) (payload($y3)['data']['youth']['id'] ?? 0);
-if ($youthC) {
-    $youthIds[] = $youthC;
-}
-$y4 = req('create_youth_d', 'POST', "$base/sk/youth", $youthBody('TestD', '2002-04-04', '09170006604'), $sk1);
-$tests[] = $y4;
-$expect['create_youth_d'] = [201];
-$youthD = (int) (payload($y4)['data']['youth']['id'] ?? 0);
-if ($youthD) {
-    $youthIds[] = $youthD;
-}
-
-$assist = req('create_assistance', 'POST', "$base/sk/assistance", json_encode([
-    'name' => 'PhaseSix Test Scholarship',
-    'category' => 'scholarship',
-    'typeId' => 1,
-    'status' => 'open',
-    'slots' => 1,
-    'amount' => 3000,
-    'deadline' => '2026-12-31',
-    'organization_id' => 4,
-]), $sk1);
-$tests[] = $assist;
-$expect['create_assistance'] = [201];
-$assistId = (int) (payload($assist)['data']['id'] ?? 0);
-if ($assistId) {
-    $assistIds[] = $assistId;
-}
-$assist2 = req('create_assistance_two', 'POST', "$base/sk/assistance", json_encode([
-    'name' => 'PhaseSix Test Aid',
-    'category' => 'financial',
-    'status' => 'open',
-    'slots' => 10,
-]), $sk1);
-$tests[] = $assist2;
-$expect['create_assistance_two'] = [201];
-$assistId2 = (int) (payload($assist2)['data']['id'] ?? 0);
-if ($assistId2) {
-    $assistIds[] = $assistId2;
-}
-
-$created = req('create_application', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => $assistId,
-    'youthId' => $youthA,
-    'remarks' => 'PhaseSix apply A',
-    'submissions' => [
-        [
-            'requirementId' => (int) ((payload($assist)['data']['requirementItems'][0]['id'] ?? 0)),
-            'fileName' => 'barangay.pdf',
-            'fileType' => 'application/pdf',
-            'fileSize' => 1024,
-            'fileRef' => 'phasesix-doc-1',
-        ],
-    ],
-    'organization_id' => 2,
-    'reviewed_by' => 99,
-]), $sk1);
-$tests[] = $created;
-$expect['create_application'] = [201];
-$appA = (int) (payload($created)['data']['id'] ?? 0);
-if ($appA) {
-    $appIds[] = $appA;
-}
-$subA = (int) (payload($created)['data']['submissions'][0]['id'] ?? 0);
-if ($subA) {
-    $subIds[] = $subA;
-}
-
-$tests[] = req('get_application', 'GET', "$base/sk/applications/{$appA}", null, $sk1);
-$expect['get_application'] = [200];
-$tests[] = req('list_after_create', 'GET', "$base/sk/applications?assistanceId={$assistId}", null, $sk1);
-$expect['list_after_create'] = [200];
-$tests[] = req('duplicate_application', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => $assistId,
-    'youthId' => $youthA,
-]), $sk1);
-$expect['duplicate_application'] = [409];
-$tests[] = req('invalid_assistance', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => 999999,
-    'youthId' => $youthA,
-]), $sk1);
-$expect['invalid_assistance'] = [404];
-$tests[] = req('invalid_youth', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => $assistId,
-    'youthId' => 999999,
-]), $sk1);
-$expect['invalid_youth'] = [404];
-
-$tests[] = req('archive_youth_d', 'POST', "$base/sk/youth/{$youthD}/archive", null, $sk1);
-$expect['archive_youth_d'] = [200];
-$tests[] = req('archived_youth_apply', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => $assistId2,
-    'youthId' => $youthD,
-]), $sk1);
-$expect['archived_youth_apply'] = [422];
-
-$tests[] = req('patch_application', 'PATCH', "$base/sk/applications/{$appA}", json_encode([
-    'remarks' => 'PhaseSix patched',
-    'organization_id' => 2,
-    'reviewed_by' => 2,
-]), $sk1);
-$expect['patch_application'] = [200];
-
-$approve = req('approve_application', 'POST', "$base/sk/applications/{$appA}/status", json_encode([
-    'status' => 'approved',
-    'remarks' => 'PhaseSix approved',
-    'reviewed_by' => 2,
-    'organization_id' => 4,
-]), $sk1);
-$tests[] = $approve;
-$expect['approve_application'] = [200];
-
-$appB = req('create_application_b', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => $assistId,
-    'youthId' => $youthB,
-    'remarks' => 'PhaseSix apply B',
-]), $sk1);
-$tests[] = $appB;
-$expect['create_application_b'] = [201];
-$appBId = (int) (payload($appB)['data']['id'] ?? 0);
-if ($appBId) {
-    $appIds[] = $appBId;
-}
-
-$tests[] = req('approve_full', 'POST', "$base/sk/applications/{$appBId}/status", json_encode([
-    'status' => 'approved',
-]), $sk1);
-$expect['approve_full'] = [422];
-
-$tests[] = req('reject_application', 'POST', "$base/sk/applications/{$appBId}/status", json_encode([
-    'status' => 'rejected',
-    'remarks' => 'PhaseSix rejected',
-]), $sk1);
-$expect['reject_application'] = [200];
-
-$appC = req('create_application_c', 'POST', "$base/sk/applications", json_encode([
-    'assistanceId' => $assistId2,
-    'youthId' => $youthC,
-    'remarks' => 'PhaseSix apply C',
-]), $sk1);
-$tests[] = $appC;
-$expect['create_application_c'] = [201];
-$appCId = (int) (payload($appC)['data']['id'] ?? 0);
-if ($appCId) {
-    $appIds[] = $appCId;
-}
-$tests[] = req('withdraw_application', 'POST', "$base/sk/applications/{$appCId}/status", json_encode([
-    'status' => 'withdrawn',
-]), $sk1);
-$expect['withdraw_application'] = [200];
-$tests[] = req('invalid_status', 'POST', "$base/sk/applications/{$appCId}/status", json_encode([
-    'status' => 'not-a-status',
-]), $sk1);
-$expect['invalid_status'] = [422];
-
-$review = req('review_requirement', 'PATCH', "$base/sk/application-requirements/{$subA}", json_encode([
-    'status' => 'verified',
-    'remarks' => 'Looks good',
-    'organization_id' => 2,
-    'reviewed_by' => 9,
-]), $sk1);
-$tests[] = $review;
-$expect['review_requirement'] = [200];
-
-$tests[] = req('login_sk2', 'POST', "$base/auth/login", $login('sk2@demo.test'), $sk2);
-$expect['login_sk2'] = [200];
-$tests[] = req('cross_get', 'GET', "$base/sk/applications/{$appA}", null, $sk2);
-$expect['cross_get'] = [404];
-$tests[] = req('cross_patch', 'PATCH', "$base/sk/applications/{$appA}", json_encode(['remarks' => 'hack']), $sk2);
-$expect['cross_patch'] = [404];
-$tests[] = req('cross_status', 'POST', "$base/sk/applications/{$appA}/status", json_encode([
-    'status' => 'rejected',
-    'remarks' => 'hack',
-    'organization_id' => 1,
-]), $sk2);
-$expect['cross_status'] = [404];
-$tests[] = req('cross_requirement', 'PATCH', "$base/sk/application-requirements/{$subA}", json_encode([
-    'status' => 'verified',
-]), $sk2);
-$expect['cross_requirement'] = [404];
-
-$tests[] = req('logout', 'POST', "$base/auth/logout", null, $sk1);
-$expect['logout'] = [200];
-$tests[] = req('me_after_logout', 'GET', "$base/auth/me", null, $sk1);
-$expect['me_after_logout'] = [401];
-$tests[] = req('relogin', 'POST', "$base/auth/login", $login('sk1@demo.test'), $sk1);
-$expect['relogin'] = [200];
-
-$assistDetail = req('assistance_after_approve', 'GET', "$base/sk/assistance/{$assistId}", null, $sk1);
-$tests[] = $assistDetail;
-$expect['assistance_after_approve'] = [200];
-foreach (payload($assistDetail)['data']['beneficiaries'] ?? [] as $b) {
-    if (!empty($b['id'])) {
-        $benIds[] = (int) $b['id'];
+$anon = $cookie('ys_app_anon_' . $stamp);
+$admin = $cookie('ys_app_admin_' . $stamp);
+$sk = $cookie('ys_app_sk_' . $stamp);
+$sk2 = $cookie('ys_app_sk2_' . $stamp);
+$youth = $cookie('ys_app_youth_' . $stamp);
+$youthB = $cookie('ys_app_youthb_' . $stamp);
+foreach ([$anon, $admin, $sk, $sk2, $youth, $youthB] as $file) {
+    if (is_file($file)) {
+        unlink($file);
     }
 }
 
-foreach (array_unique($subIds) as $id) {
-    $pdo->prepare('DELETE FROM application_submissions WHERE id = :id')->execute(['id' => $id]);
-}
-$leftSubs = $pdo->prepare('SELECT id FROM application_submissions WHERE application_id = :id');
-foreach ($appIds as $id) {
-    $leftSubs->execute(['id' => $id]);
-    foreach ($leftSubs->fetchAll(PDO::FETCH_COLUMN) as $sid) {
-        $pdo->prepare('DELETE FROM application_submissions WHERE id = :id')->execute(['id' => (int) $sid]);
+try {
+    $anonGet = $req('GET', "$base/youth/applications", null, $anon);
+    $check('anon_list_401', $anonGet['status'] === 401, $detail($anonGet));
+    $anonPost = $req('POST', "$base/youth/applications", json_encode(['assistanceId' => 1]), $anon);
+    $check('anon_create_401', $anonPost['status'] === 401, $detail($anonPost));
+
+    $adminLogin = $login('admin@skmms.test', 'YouthSync1!', $admin);
+    $check('admin_login', $adminLogin['status'] === 200, $detail($adminLogin));
+    $adminGet = $req('GET', "$base/youth/applications", null, $admin);
+    $check('admin_youth_route_403', $adminGet['status'] === 403, $detail($adminGet));
+
+    $skLogin = $login('sk1@demo.test', 'YouthSync1!', $sk);
+    $check('sk_login', $skLogin['status'] === 200, $detail($skLogin));
+    $skYouth = $req('POST', "$base/youth/applications", json_encode(['assistanceId' => 1]), $sk);
+    $check('sk_youth_route_403', $skYouth['status'] === 403, $detail($skYouth));
+    $me = $data($req('GET', "$base/auth/me", null, $sk));
+    $orgId = (int) ($me['organization']['id'] ?? $me['organizationId'] ?? 0);
+    $check('sk_org', $orgId > 0, $detail($req('GET', "$base/auth/me", null, $sk)));
+
+    $sk2Login = $login('sk2@demo.test', 'YouthSync1!', $sk2);
+    $check('sk2_login', $sk2Login['status'] === 200, $detail($sk2Login));
+    $me2 = $data($req('GET', "$base/auth/me", null, $sk2));
+    $org2 = (int) ($me2['organization']['id'] ?? $me2['organizationId'] ?? 0);
+    $check('sk2_other_org', $org2 > 0 && $org2 !== $orgId, 'org2=' . $org2);
+
+    $youthLogin = $login('youth-auth-test@example.test', 'YouthAuthTest1!', $youth);
+    $check('youth_login', $youthLogin['status'] === 200, $detail($youthLogin));
+    $youthMe = $data($req('GET', "$base/auth/me", null, $youth));
+    $youthId = (int) ($youthMe['youth']['id'] ?? $youthMe['user']['youthId'] ?? 0);
+    $check('youth_id', $youthId > 0, json_encode($youthMe));
+    $youthSk = $req('GET', "$base/sk/applications", null, $youth);
+    $check('youth_sk_route_403', $youthSk['status'] === 403, $detail($youthSk));
+
+    $program = $data($created = $req('POST', "$base/sk/assistance", json_encode([
+        'name' => $prefix . ' Approve',
+        'category' => 'scholarship',
+        'status' => 'open',
+        'description' => 'Applications HTTP test',
+        'slots' => 5,
+        'amount' => 500,
+        'organization_id' => $org2,
+        'org_id' => 999,
+    ]), $sk));
+    $programId = (int) ($program['id'] ?? 0);
+    if ($programId > 0) {
+        $programIds[] = $programId;
     }
-}
-foreach ($appIds as $id) {
-    $pdo->prepare('DELETE FROM applications WHERE id = :id')->execute(['id' => $id]);
-}
-foreach (array_unique($benIds) as $id) {
-    $tests[] = req("cleanup_beneficiary_{$id}", 'DELETE', "$base/sk/beneficiaries/{$id}", null, $sk1);
-    $expect["cleanup_beneficiary_{$id}"] = [200];
-}
-foreach ($assistIds as $id) {
-    $tests[] = req("cleanup_assistance_{$id}", 'DELETE', "$base/sk/assistance/{$id}", null, $sk1);
-    $expect["cleanup_assistance_{$id}"] = [200];
-}
-foreach ($youthIds as $id) {
-    $tests[] = req("cleanup_youth_{$id}", 'DELETE', "$base/sk/youth/{$id}", null, $sk1);
-    $expect["cleanup_youth_{$id}"] = [200];
+    $check('create_open_program', $created['status'] === 201 && $programId > 0 && ($program['status'] ?? '') === 'open', $detail($created));
+
+    $rejectProgram = $data($createdReject = $req('POST', "$base/sk/assistance", json_encode([
+        'name' => $prefix . ' Reject',
+        'category' => 'scholarship',
+        'status' => 'open',
+        'description' => 'Applications HTTP reject path',
+        'slots' => 5,
+        'organization_id' => $org2,
+    ]), $sk));
+    $rejectProgramId = (int) ($rejectProgram['id'] ?? 0);
+    if ($rejectProgramId > 0) {
+        $programIds[] = $rejectProgramId;
+    }
+    $check('create_reject_program', $createdReject['status'] === 201 && $rejectProgramId > 0, $detail($createdReject));
+
+    $spoofedYouth = $youthId + 1000;
+    $createdApp = $req('POST', "$base/youth/applications", json_encode([
+        'assistanceId' => $programId,
+        'youthId' => $spoofedYouth,
+        'youth_id' => $spoofedYouth,
+        'organization_id' => $org2,
+        'organizationId' => $org2,
+        'status' => 'approved',
+        'role' => 'SYSTEM_ADMIN',
+    ]), $youth);
+    $application = $data($createdApp);
+    $applicationId = (int) ($application['id'] ?? 0);
+    if ($applicationId > 0) {
+        $applicationIds[] = $applicationId;
+    }
+    $check('youth_create_201', $createdApp['status'] === 201 && $applicationId > 0, $detail($createdApp));
+    $check('youth_create_pending', ($application['status'] ?? '') === 'pending', $detail($createdApp));
+    $check('youth_create_no_password', stripos($createdApp['body'], 'password_hash') === false);
+    $rowStmt = $pdo->prepare('SELECT organization_id, youth_id, assistance_id, status FROM applications WHERE id = :id');
+    $rowStmt->execute(['id' => $applicationId]);
+    $row = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('persisted_pending', ($row['status'] ?? '') === 'pending', json_encode($row));
+    $check('persisted_session_youth', (int) ($row['youth_id'] ?? 0) === $youthId, json_encode($row));
+    $check('persisted_session_org', (int) ($row['organization_id'] ?? 0) === $orgId, json_encode($row));
+    $check('spoofed_youth_ignored', (int) ($row['youth_id'] ?? 0) !== $spoofedYouth);
+
+    $listed = $req('GET', "$base/youth/applications?organization_id={$org2}&youth_id={$spoofedYouth}", null, $youth);
+    $check('youth_list_includes', $listed['status'] === 200 && $containsId($listed, $applicationId), $detail($listed));
+    $shown = $req('GET', "$base/youth/applications/{$applicationId}", null, $youth);
+    $check('youth_read', $shown['status'] === 200 && ($data($shown)['status'] ?? '') === 'pending', $detail($shown));
+
+    $duplicate = $req('POST', "$base/youth/applications", json_encode([
+        'assistanceId' => $programId,
+    ]), $youth);
+    $check('duplicate_409', $duplicate['status'] === 409, $detail($duplicate));
+    $countStmt = $pdo->prepare('SELECT COUNT(*) FROM applications WHERE assistance_id = :aid AND youth_id = :youth');
+    $countStmt->execute(['aid' => $programId, 'youth' => $youthId]);
+    $check('duplicate_one_row', (int) $countStmt->fetchColumn() === 1);
+
+    $skList = $req('GET', "$base/sk/applications?organization_id={$org2}", null, $sk);
+    $check('sk_sees_own', $skList['status'] === 200 && $containsId($skList, $applicationId), $detail($skList));
+    $sk2List = $req('GET', "$base/sk/applications?organization_id={$orgId}", null, $sk2);
+    $check('sk2_list_hides', $sk2List['status'] === 200 && !$containsId($sk2List, $applicationId), $detail($sk2List));
+    $sk2Read = $req('GET', "$base/sk/applications/{$applicationId}", null, $sk2);
+    $check('sk2_read_404', $sk2Read['status'] === 404, $detail($sk2Read));
+    $sk2Approve = $req('POST', "$base/sk/applications/{$applicationId}/approve", json_encode([
+        'organization_id' => $orgId,
+    ]), $sk2);
+    $check('sk2_approve_404', $sk2Approve['status'] === 404, $detail($sk2Approve));
+
+    $needs = $req('POST', "$base/sk/applications/{$applicationId}/status", json_encode([
+        'status' => 'needs_resubmission',
+        'remarks' => 'Please resubmit this test application.',
+        'organization_id' => $org2,
+    ]), $sk);
+    $check('sk_needs_resubmission', $needs['status'] === 200 && ($data($needs)['status'] ?? '') === 'needs_resubmission', $detail($needs));
+    $youthSees = $req('GET', "$base/youth/applications/{$applicationId}", null, $youth);
+    $check('youth_sees_resubmission', ($data($youthSees)['status'] ?? '') === 'needs_resubmission', $detail($youthSees));
+
+    $tooSoon = $req('POST', "$base/youth/applications/{$applicationId}/resubmit", json_encode([
+        'status' => 'approved',
+        'youth_id' => $spoofedYouth,
+        'organization_id' => $org2,
+    ]), $youth);
+    $resubmitted = $tooSoon;
+    $check('youth_resubmit', $resubmitted['status'] === 200 && ($data($resubmitted)['status'] ?? '') === 'pending', $detail($resubmitted));
+    $rowStmt->execute(['id' => $applicationId]);
+    $afterResubmit = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('resubmit_pending_persisted', ($afterResubmit['status'] ?? '') === 'pending' && (int) ($afterResubmit['youth_id'] ?? 0) === $youthId, json_encode($afterResubmit));
+    $again = $req('POST', "$base/youth/applications/{$applicationId}/resubmit", '{}', $youth);
+    $check('resubmit_only_when_requested', $again['status'] === 422, $detail($again));
+
+    $approved = $req('POST', "$base/sk/applications/{$applicationId}/approve", json_encode([
+        'organization_id' => $org2,
+        'status' => 'rejected',
+    ]), $sk);
+    $check('sk_approve', $approved['status'] === 200 && ($data($approved)['status'] ?? '') === 'approved', $detail($approved));
+    $rowStmt->execute(['id' => $applicationId]);
+    $approvedRow = $rowStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $check('approve_persisted', ($approvedRow['status'] ?? '') === 'approved', json_encode($approvedRow));
+    $youthApproved = $req('GET', "$base/youth/applications/{$applicationId}", null, $youth);
+    $check('youth_sees_approved', ($data($youthApproved)['status'] ?? '') === 'approved', $detail($youthApproved));
+
+    $rejectApp = $req('POST', "$base/youth/applications", json_encode([
+        'assistanceId' => $rejectProgramId,
+        'status' => 'approved',
+        'youthId' => $spoofedYouth,
+    ]), $youth);
+    $rejectApplicationId = (int) ($data($rejectApp)['id'] ?? 0);
+    if ($rejectApplicationId > 0) {
+        $applicationIds[] = $rejectApplicationId;
+    }
+    $check('youth_reject_path_create', $rejectApp['status'] === 201 && ($data($rejectApp)['status'] ?? '') === 'pending', $detail($rejectApp));
+    $rejected = $req('POST', "$base/sk/applications/{$rejectApplicationId}/reject", json_encode([
+        'remarks' => 'Rejected by the applications HTTP test.',
+        'organization_id' => $orgId,
+    ]), $sk);
+    $check('sk_reject', $rejected['status'] === 200 && ($data($rejected)['status'] ?? '') === 'rejected', $detail($rejected));
+    $youthRejected = $req('GET', "$base/youth/applications/{$rejectApplicationId}", null, $youth);
+    $check('youth_sees_rejected', ($data($youthRejected)['status'] ?? '') === 'rejected', $detail($youthRejected));
+
+    $otherStmt = $pdo->prepare(
+        "SELECT u.id, u.email, u.password_hash, u.must_change_password, u.youth_id, y.organization_id
+         FROM users u
+         INNER JOIN roles r ON r.id = u.role_id
+         INNER JOIN youth y ON y.id = u.youth_id
+         WHERE r.code = 'YOUTH' AND u.status = 'active' AND y.archived = 0
+           AND u.email <> 'youth-auth-test@example.test'
+         ORDER BY u.id
+         LIMIT 1"
+    );
+    $otherStmt->execute();
+    $otherUser = $otherStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    $check('second_youth_available', is_array($otherUser) && (int) ($otherUser['id'] ?? 0) > 0);
+    if (is_array($otherUser)) {
+        $otherHash = (string) $otherUser['password_hash'];
+        $otherMustChange = (int) $otherUser['must_change_password'];
+        $temp = 'AppHttpYouthB1!';
+        $pdo->prepare('UPDATE users SET password_hash = :hash, must_change_password = 0 WHERE id = :id')
+            ->execute(['hash' => password_hash($temp, PASSWORD_DEFAULT), 'id' => (int) $otherUser['id']]);
+        $otherLogin = $login((string) $otherUser['email'], $temp, $youthB);
+        $check('youth_b_login', $otherLogin['status'] === 200, $detail($otherLogin));
+        $otherRead = $req('GET', "$base/youth/applications/{$applicationId}", null, $youthB);
+        $check('youth_b_cannot_read', $otherRead['status'] === 404, $detail($otherRead));
+        $otherCreate = $req('POST', "$base/youth/applications", json_encode([
+            'assistanceId' => $programId,
+            'youthId' => $youthId,
+            'youth_id' => $youthId,
+            'organization_id' => $orgId,
+            'status' => 'approved',
+        ]), $youthB);
+        $otherCreatedId = (int) ($data($otherCreate)['id'] ?? 0);
+        if ($otherCreatedId > 0) {
+            $applicationIds[] = $otherCreatedId;
+            $ownStmt = $pdo->prepare('SELECT youth_id, organization_id, status FROM applications WHERE id = :id');
+            $ownStmt->execute(['id' => $otherCreatedId]);
+            $own = $ownStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $check('youth_b_cannot_own_as_a', (int) ($own['youth_id'] ?? 0) === (int) $otherUser['youth_id'] && (int) ($own['youth_id'] ?? 0) !== $youthId, json_encode($own));
+            $check('youth_b_status_pending', ($own['status'] ?? '') === 'pending');
+        } else {
+            $check('youth_b_cross_org_blocked', in_array($otherCreate['status'], [404, 422], true), $detail($otherCreate));
+        }
+    }
+} finally {
+    if (is_array($otherUser) && $otherHash !== null) {
+        $pdo->prepare('UPDATE users SET password_hash = :hash, must_change_password = :flag WHERE id = :id')
+            ->execute([
+                'hash' => $otherHash,
+                'flag' => $otherMustChange,
+                'id' => (int) $otherUser['id'],
+            ]);
+    }
+
+    if ($applicationIds) {
+        $appPlace = implode(',', array_fill(0, count($applicationIds), '?'));
+        $pdo->prepare("DELETE FROM application_submissions WHERE application_id IN ($appPlace)")->execute($applicationIds);
+        $pdo->prepare("DELETE FROM notifications WHERE related_entity_type = 'application' AND related_entity_id IN ($appPlace)")->execute($applicationIds);
+        $pdo->prepare("DELETE FROM sms_deliveries WHERE event_code LIKE 'application.%' AND event_id IN ($appPlace)")->execute($applicationIds);
+        $pdo->prepare("DELETE FROM email_deliveries WHERE event_code LIKE 'application.%' AND event_id IN ($appPlace)")->execute($applicationIds);
+        $pdo->prepare("DELETE FROM applications WHERE id IN ($appPlace)")->execute($applicationIds);
+    }
+    if ($programIds) {
+        $progPlace = implode(',', array_fill(0, count($programIds), '?'));
+        $pdo->prepare("DELETE FROM beneficiaries WHERE assistance_id IN ($progPlace)")->execute($programIds);
+        $pdo->prepare("DELETE FROM assistance_requirements WHERE assistance_id IN ($progPlace)")->execute($programIds);
+        $pdo->prepare("DELETE FROM assistance_programs WHERE id IN ($progPlace) AND name LIKE 'AppHttp %'")->execute($programIds);
+    }
+
+    $afterApplications = $ids('applications');
+    $afterPrograms = $ids('assistance_programs');
+    $afterBeneficiaries = $ids('beneficiaries');
+    $afterSubmissions = $ids('application_submissions');
+    $check('applications_unchanged', $beforeApplications === $afterApplications, 'before=' . implode(',', $beforeApplications) . ' after=' . implode(',', $afterApplications));
+    $check('programs_unchanged', $beforePrograms === $afterPrograms, 'before=' . implode(',', $beforePrograms) . ' after=' . implode(',', $afterPrograms));
+    $check('beneficiaries_unchanged', $beforeBeneficiaries === $afterBeneficiaries);
+    $check('submissions_unchanged', $beforeSubmissions === $afterSubmissions);
+    $left = $pdo->query("SELECT id, name FROM assistance_programs WHERE name LIKE 'AppHttp %'")->fetchAll(PDO::FETCH_ASSOC);
+    $check('no_apphttp_programs', $left === [] || $left === false, json_encode($left));
 }
 
-$after = $counts();
-$failed = [];
-foreach ($tests as $t) {
-    $hasHash = stripos($t['body'], 'password_hash') !== false
-        || stripos($t['body'], 'token_hash') !== false;
-    echo $t['name'] . "\t" . $t['status'] . "\thash=" . ($hasHash ? 'YES' : 'no') . PHP_EOL;
-    echo $t['body'] . PHP_EOL . PHP_EOL;
-    $allowed = $expect[$t['name']] ?? null;
-    if ($allowed !== null && !in_array($t['status'], $allowed, true)) {
-        $failed[] = $t['name'] . ' expected ' . implode('/', $allowed) . ' got ' . $t['status'];
-    }
-    if ($hasHash) {
-        $failed[] = $t['name'] . ' leaked hash/secret field';
-    }
-    if (str_contains($t['body'], 'C:\\') || str_contains($t['body'], '/xampp/')) {
-        $failed[] = $t['name'] . ' leaked filesystem path';
-    }
-}
-
-$approveData = payload($approve)['data'] ?? [];
-if (($approveData['status'] ?? '') !== 'approved') {
-    $failed[] = 'approve did not set status approved';
-}
-if ((int) ($approveData['reviewedBy']['id'] ?? 0) !== 1) {
-    $failed[] = 'reviewed_by did not come from session user 1';
-}
-if (($approveData['reviewedAt'] ?? '') === '') {
-    $failed[] = 'reviewed_at was not populated';
-}
-$listItems = payload(array_values(array_filter($tests, static fn ($t) => $t['name'] === 'list_after_create'))[0] ?? ['body' => '{}'])['data']['items'] ?? [];
-$found = false;
-foreach ($listItems as $item) {
-    if ((int) ($item['id'] ?? 0) === $appA) {
-        $found = true;
-    }
-}
-if ($appA && !$found) {
-    $failed[] = 'list did not include created application';
-}
-$assistBens = payload($assistDetail)['data']['beneficiaries'] ?? [];
-$benOk = false;
-foreach ($assistBens as $b) {
-    if ((int) ($b['youthId'] ?? 0) === $youthA && ($b['status'] ?? '') === 'approved') {
-        $benOk = true;
-    }
-}
-if (!$benOk) {
-    $failed[] = 'approval did not create/update Phase 5 beneficiary';
-}
-
-foreach ($before as $key => $n) {
-    if ($after[$key] !== $n) {
-        $failed[] = "{$key} count changed {$n} -> {$after[$key]}";
-    }
-}
-$left = $pdo->query("SELECT id FROM youth WHERE first_name = 'PhaseSix'")->fetchAll();
-$leftP = $pdo->query("SELECT id FROM assistance_programs WHERE name LIKE 'PhaseSix Test%'")->fetchAll();
-if ($left || $leftP) {
-    $failed[] = 'leftover PhaseSix test records remain';
-}
-
-echo "application_id={$appA}\n";
-echo "assistance_id={$assistId}\n";
-echo "youth_a={$youthA}\n";
-foreach ($before as $key => $n) {
-    echo "{$key}_before={$n} {$key}_after={$after[$key]}\n";
-}
-
-if ($failed) {
-    echo "RESULT=FAIL\n";
-    foreach ($failed as $f) {
-        echo "FAIL: {$f}\n";
-    }
+if ($failures > 0) {
+    echo "FAILED {$failures}\n";
     exit(1);
 }
-
-echo "RESULT=PASS\n";
+echo "ALL PASSED\n";
+exit(0);

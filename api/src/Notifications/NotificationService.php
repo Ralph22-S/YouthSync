@@ -4,7 +4,9 @@ declare(strict_types=1);
 namespace YouthSync\Notifications;
 
 use PDO;
+use YouthSync\Admin\ActivityLog;
 use YouthSync\Http\Json;
+use YouthSync\Http\Pagination;
 
 final class NotificationService
 {
@@ -33,17 +35,7 @@ final class NotificationService
      */
     public function list(int $organizationId, int $userId, array $query): array
     {
-        $page = (int) ($query['page'] ?? 1);
-        if ($page < 1) {
-            $page = 1;
-        }
-        $perPage = (int) ($query['perPage'] ?? $query['per_page'] ?? 50);
-        if ($perPage < 1) {
-            $perPage = 50;
-        }
-        if ($perPage > 100) {
-            $perPage = 100;
-        }
+        $paging = Pagination::fromQuery($query, 50, 100);
 
         [$sqlWhere, $params] = $this->inboxWhere($organizationId, $userId);
 
@@ -59,30 +51,27 @@ final class NotificationService
             $params['type'] = $type;
         }
 
-        $q = trim((string) ($query['q'] ?? ''));
+        $q = Pagination::search($query);
         if ($q !== '') {
-            $sqlWhere .= ' AND (title LIKE :qTitle OR message LIKE :qMessage)';
-            $params['qTitle'] = '%' . $q . '%';
-            $params['qMessage'] = '%' . $q . '%';
+            $sqlWhere .= ' AND ' . Pagination::likeAny(['title', 'message'], $q, 'q', $params);
         }
 
         $unreadOnly = $query['unreadOnly'] ?? $query['unread_only'] ?? null;
+        $readOnly = $query['readOnly'] ?? $query['read_only'] ?? null;
         if ($this->truthy($unreadOnly)) {
             $sqlWhere .= ' AND is_read = 0';
+        } elseif ($this->truthy($readOnly)) {
+            $sqlWhere .= ' AND is_read = 1';
         }
 
         $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM notifications WHERE {$sqlWhere}");
         $countStmt->execute($params);
         $total = (int) $countStmt->fetchColumn();
 
-        $pages = max(1, (int) ceil(($total ?: 1) / $perPage));
-        if ($page > $pages) {
-            $page = $pages;
-        }
-        $offset = ($page - 1) * $perPage;
+        $meta = $paging->meta($total);
 
         $listStmt = $this->pdo->prepare(
-            "SELECT * FROM notifications WHERE {$sqlWhere} ORDER BY created_at DESC, id DESC LIMIT {$perPage} OFFSET {$offset}"
+            "SELECT * FROM notifications WHERE {$sqlWhere} ORDER BY created_at DESC, id DESC {$paging->limitSql()}"
         );
         $listStmt->execute($params);
         $items = [];
@@ -92,10 +81,7 @@ final class NotificationService
 
         return [
             'items' => $items,
-            'page' => $page,
-            'perPage' => $perPage,
-            'total' => $total,
-            'pages' => $pages,
+            ...$meta,
             'unreadCount' => $unreadCount,
         ];
     }
@@ -111,7 +97,7 @@ final class NotificationService
     /**
      * @return array<string, mixed>
      */
-    public function markRead(int $organizationId, int $userId, int $id): array
+    public function markRead(int $organizationId, int $userId, int $id, array $actor = []): array
     {
         $this->requireAccessible($organizationId, $userId, $id);
         $this->pdo->prepare(
@@ -122,26 +108,114 @@ final class NotificationService
             'id' => $id,
             'org' => $organizationId,
         ]);
-        return $this->publicNotification($this->requireAccessible($organizationId, $userId, $id));
+        $saved = $this->publicNotification($this->requireAccessible($organizationId, $userId, $id));
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'notification.read',
+            'notification',
+            'Marked notification as read',
+            ['entityType' => 'notification', 'entityId' => $id]
+        );
+        return $saved;
     }
 
     /**
      * @return array{updated: int}
      */
-    public function markAllRead(int $organizationId, int $userId): array
+    public function markAllRead(int $organizationId, int $userId, array $actor = []): array
     {
         [$sqlWhere, $params] = $this->inboxWhere($organizationId, $userId);
         $stmt = $this->pdo->prepare(
             "UPDATE notifications SET is_read = 1, read_at = NOW() WHERE {$sqlWhere} AND is_read = 0"
         );
         $stmt->execute($params);
+        $updated = $stmt->rowCount();
+        if ($updated > 0) {
+            ActivityLog::recordSk(
+                $this->pdo,
+                $organizationId,
+                $actor,
+                'notification.read',
+                'notification',
+                'Marked ' . $updated . ' notification(s) as read',
+                ['entityType' => 'notification']
+            );
+        }
+        return ['updated' => $updated];
+    }
+
+    /**
+     * @param array<string, mixed> $query
+     * @return array<string, mixed>
+     */
+    public function listForYouth(int $organizationId, int $youthId, array $query): array
+    {
+        $paging = Pagination::fromQuery($query, 50, 100);
+        [$sqlWhere, $params] = $this->youthInboxWhere($organizationId, $youthId);
+        $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM notifications WHERE {$sqlWhere}");
+        $countStmt->execute($params);
+        $total = (int) $countStmt->fetchColumn();
+        $meta = $paging->meta($total);
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM notifications WHERE {$sqlWhere}
+             ORDER BY created_at DESC, id DESC
+             {$paging->limitSql()}"
+        );
+        $stmt->execute($params);
+        $items = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $items[] = $this->publicNotification($row);
+        }
+        $unread = $this->pdo->prepare("SELECT COUNT(*) FROM notifications WHERE {$sqlWhere} AND is_read = 0");
+        $unread->execute($params);
+        return [
+            'items' => $items,
+            ...$meta,
+            'unreadCount' => (int) $unread->fetchColumn(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function markReadForYouth(int $organizationId, int $youthId, int $id): array
+    {
+        $this->requireYouthNotification($organizationId, $youthId, $id);
+        $this->pdo->prepare(
+            'UPDATE notifications SET is_read = 1, read_at = NOW()
+             WHERE id = :id AND organization_id = :org AND youth_id = :youth'
+        )->execute(['id' => $id, 'org' => $organizationId, 'youth' => $youthId]);
+        return $this->publicNotification($this->requireYouthNotification($organizationId, $youthId, $id));
+    }
+
+    /**
+     * @return array{updated: int}
+     */
+    public function markAllReadForYouth(int $organizationId, int $youthId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE notifications SET is_read = 1, read_at = NOW()
+             WHERE organization_id = :org AND youth_id = :youth AND is_read = 0'
+        );
+        $stmt->execute(['org' => $organizationId, 'youth' => $youthId]);
         return ['updated' => $stmt->rowCount()];
     }
 
     /**
      * @return array{deleted: true}
      */
-    public function delete(int $organizationId, int $userId, int $id): array
+    public function deleteForYouth(int $organizationId, int $youthId, int $id): array
+    {
+        $this->requireYouthNotification($organizationId, $youthId, $id);
+        $this->pdo->prepare(
+            'DELETE FROM notifications WHERE id = :id AND organization_id = :org AND youth_id = :youth'
+        )->execute(['id' => $id, 'org' => $organizationId, 'youth' => $youthId]);
+        return ['deleted' => true];
+    }
+
+    public function delete(int $organizationId, int $userId, int $id, array $actor = []): array
     {
         $this->requireAccessible($organizationId, $userId, $id);
         $this->pdo->prepare(
@@ -150,6 +224,15 @@ final class NotificationService
             'id' => $id,
             'org' => $organizationId,
         ]);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'notification.deleted',
+            'notification',
+            'Deleted a notification',
+            ['entityType' => 'notification', 'entityId' => $id]
+        );
         return ['deleted' => true];
     }
 
@@ -303,6 +386,35 @@ final class NotificationService
         );
         $stmt->execute(['org' => $organizationId, 'userId' => $userId]);
         return $stmt->fetch() !== false;
+    }
+
+    /**
+     * @return array{0: string, 1: array<string, int>}
+     */
+    private function youthInboxWhere(int $organizationId, int $youthId): array
+    {
+        return [
+            'organization_id = :org AND youth_id = :youthId',
+            ['org' => $organizationId, 'youthId' => $youthId],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function requireYouthNotification(int $organizationId, int $youthId, int $id): array
+    {
+        if ($id < 1) {
+            Json::error('NOT_FOUND', 'This notification does not exist.', 404);
+        }
+        [$sqlWhere, $params] = $this->youthInboxWhere($organizationId, $youthId);
+        $stmt = $this->pdo->prepare("SELECT * FROM notifications WHERE id = :id AND {$sqlWhere} LIMIT 1");
+        $stmt->execute($params + ['id' => $id]);
+        $row = $stmt->fetch();
+        if ($row === false) {
+            Json::error('NOT_FOUND', 'This notification does not exist.', 404);
+        }
+        return $row;
     }
 
     private function youthInOrganization(int $organizationId, int $youthId): bool
@@ -537,7 +649,7 @@ final class NotificationService
                 'event_code' => $eventCode,
                 'event_id' => $eventId,
                 'recipient_email' => $normalized,
-                'provider' => 'resend',
+                'provider' => 'brevo',
                 'status' => 'pending',
             ]);
         } catch (\PDOException $e) {
@@ -608,4 +720,123 @@ final class NotificationService
         $row = $stmt->fetch();
         return is_array($row) ? $row : null;
     }
+    /**
+     * @param array<string, mixed> $query
+     * @return array<string, mixed>
+     */
+    public function listSmsDeliveries(int $organizationId, array $query): array
+    {
+        unset($query['organization_id'], $query['orgId'], $query['organizationId'], $query['org_id']);
+        $paging = Pagination::fromQuery($query, 100, 100);
+        $q = Pagination::search($query);
+        $where = ['organization_id = :org'];
+        $params = ['org' => $organizationId];
+        if ($q !== '') {
+            $where[] = Pagination::likeAny(
+                ['recipient', 'event_code', 'status', "COALESCE(error_message, '')"],
+                $q, 'q', $params
+            );
+        }
+        $sqlWhere = implode(' AND ', $where);
+        $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM sms_deliveries WHERE {$sqlWhere}");
+        $countStmt->execute($params);
+        $total = (int) $countStmt->fetchColumn();
+        $meta = $paging->meta($total);
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM sms_deliveries WHERE {$sqlWhere}
+             ORDER BY created_at DESC, id DESC
+             {$paging->limitSql()}"
+        );
+        $stmt->execute($params);
+        $items = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $items[] = [
+                'id' => (int) $row['id'],
+                'orgId' => (int) $row['organization_id'],
+                'notificationId' => $row['notification_id'] === null ? null : (int) $row['notification_id'],
+                'eventCode' => $row['event_code'],
+                'eventId' => (int) $row['event_id'],
+                'mobile' => $row['recipient'],
+                'recipient' => $row['recipient'],
+                'provider' => $row['provider'],
+                'status' => $row['status'],
+                'providerReference' => $row['provider_reference'],
+                'errorMessage' => $row['error_message'],
+                // Set only when the provider accepted the message. Never backfilled from created_at.
+                'sentAt' => $row['sent_at'] ?? null,
+                'createdAt' => $row['created_at'],
+                'type' => $row['event_code'],
+                'text' => $row['error_message'] ? ('Delivery: ' . $row['status'] . ' — ' . $row['error_message']) : ('Delivery: ' . $row['status']),
+                'name' => $row['recipient'],
+                'related' => $row['event_code'],
+            ];
+        }
+        return [
+            'items' => $items,
+            ...$meta,
+            // Whether this server can currently send SMS. Never includes the key itself.
+            'providerConfigured' => $this->sms !== null && $this->sms->isConfigured(),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $query
+     * @return array<string, mixed>
+     */
+    public function listEmailDeliveries(int $organizationId, array $query): array
+    {
+        unset($query['organization_id'], $query['orgId'], $query['organizationId'], $query['org_id']);
+        $paging = Pagination::fromQuery($query, 100, 100);
+        $q = Pagination::search($query);
+        $where = ['organization_id = :org'];
+        $params = ['org' => $organizationId];
+        if ($q !== '') {
+            $where[] = Pagination::likeAny(
+                ['recipient_email', "COALESCE(recipient_name, '')", 'event_code', 'status', "COALESCE(error_message, '')"],
+                $q, 'q', $params
+            );
+        }
+        $sqlWhere = implode(' AND ', $where);
+        $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM email_deliveries WHERE {$sqlWhere}");
+        $countStmt->execute($params);
+        $total = (int) $countStmt->fetchColumn();
+        $meta = $paging->meta($total);
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM email_deliveries WHERE {$sqlWhere}
+             ORDER BY created_at DESC, id DESC
+             {$paging->limitSql()}"
+        );
+        $stmt->execute($params);
+        $items = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $items[] = [
+                'id' => (int) $row['id'],
+                'orgId' => (int) $row['organization_id'],
+                'notificationId' => $row['notification_id'] === null ? null : (int) $row['notification_id'],
+                'eventCode' => $row['event_code'],
+                'eventId' => (int) $row['event_id'],
+                'email' => $row['recipient_email'],
+                'name' => $row['recipient_name'] ?: $row['recipient_email'],
+                'provider' => $row['provider'],
+                'status' => $row['status'],
+                'providerReference' => $row['provider_reference'],
+                'errorMessage' => $row['error_message'],
+                // Set only when the provider accepted the message. Never backfilled from created_at.
+                'sentAt' => $row['sent_at'] ?? null,
+                'createdAt' => $row['created_at'],
+                'type' => $row['event_code'],
+                'subject' => 'Delivery status: ' . $row['status'],
+                'body' => $row['error_message'] ? ('Delivery: ' . $row['status'] . ' — ' . $row['error_message']) : ('Delivery: ' . $row['status'] . ' via ' . $row['provider']),
+                'related' => $row['event_code'],
+            ];
+        }
+        return [
+            'items' => $items,
+            ...$meta,
+            // Whether this server can currently send email. Never includes the key itself.
+            // When false, new email attempts are skipped and no delivery row is written.
+            'providerConfigured' => $this->email !== null && $this->email->isConfigured(),
+        ];
+    }
+
 }

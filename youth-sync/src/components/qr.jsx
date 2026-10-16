@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 
 /** Renders the youth's attendance pass as a scannable QR image. */
-export function QrImage({ value, size = 220 }) {
+export function QrImage({ value, size = 220, alt = 'QR code' }) {
   const [src, setSrc] = useState('');
 
   useEffect(() => {
@@ -14,7 +14,7 @@ export function QrImage({ value, size = 220 }) {
   }, [value, size]);
 
   if (!src) return <div className="grid place-items-center rounded-lg border border-line bg-shell text-xs text-[#8391A4]" style={{ width: size, height: size }}>Generating…</div>;
-  return <img src={src} alt="Attendance QR code" width={size} height={size} className="rounded-lg border border-line bg-white p-2" />;
+  return <img src={src} alt={alt} width={size} height={size} className="rounded-lg border border-line bg-white p-2" />;
 }
 
 const cameraMessage = (err) => {
@@ -86,9 +86,16 @@ const stopScanner = async (scanner) => {
  * Camera scanner with a manual-entry fallback.
  * Camera is requested only after "Open camera scanner". localhost is a secure context.
  */
-export function QrScanner({ onScan, placeholder = 'YSYOUTH-YTH-001' }) {
+export function QrScanner({
+  onScan,
+  placeholder = 'YSYOUTH-YTH-001',
+  showManual = true,
+  openLabel = 'Open camera scanner',
+  startOpen = false,
+  deniedMessage = '',
+}) {
   const readerId = `qr-reader-${useId().replace(/:/g, '')}`;
-  const [active, setActive] = useState(false);
+  const [active, setActive] = useState(startOpen);
   const [error, setError] = useState('');
   const [manual, setManual] = useState('');
   const instance = useRef(null);
@@ -102,7 +109,7 @@ export function QrScanner({ onScan, placeholder = 'YSYOUTH-YTH-001' }) {
 
     const run = async () => {
       if (!navigator.mediaDevices?.getUserMedia) {
-        setError('This browser cannot access the camera. Use the manual field below.');
+        setError(deniedMessage || 'This browser cannot access the camera. Use the manual field below.');
         setActive(false);
         return;
       }
@@ -154,7 +161,8 @@ export function QrScanner({ onScan, placeholder = 'YSYOUTH-YTH-001' }) {
         if (cancelled) return;
         instance.current = null;
         setActive(false);
-        setError(cameraMessage(err));
+        const denied = /NotAllowed|Permission|NotFound|DevicesNotFound|NotReadable/i.test(`${err?.name || ''} ${err?.message || ''}`);
+        setError(denied && deniedMessage ? deniedMessage : cameraMessage(err));
       }
     };
 
@@ -166,7 +174,7 @@ export function QrScanner({ onScan, placeholder = 'YSYOUTH-YTH-001' }) {
       instance.current = null;
       stopScanner(scanner);
     };
-  }, [active, readerId]);
+  }, [active, readerId, deniedMessage]);
 
   return (
     <div>
@@ -175,18 +183,18 @@ export function QrScanner({ onScan, placeholder = 'YSYOUTH-YTH-001' }) {
       <div className="mt-3 flex gap-2">
         {active
           ? <button type="button" className="btn btn-ghost" onClick={() => setActive(false)}>Stop camera</button>
-          : <button type="button" className="btn btn-primary" onClick={() => { setError(''); setActive(true); }}>Open camera scanner</button>}
+          : <button type="button" className="btn btn-primary" onClick={() => { setError(''); setActive(true); }}>{openLabel}</button>}
       </div>
 
       {error && <p className="mt-2 rounded-lg border border-[#F2DCA8] bg-sun-100 px-3 py-2 text-xs text-[#7A5A05]">{error}</p>}
 
-      <form className="mt-4 border-t border-line pt-4" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { onScan(manual.trim()); setManual(''); } }}>
+      {showManual && <form className="mt-4 border-t border-line pt-4" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { onScan(manual.trim()); setManual(''); } }}>
         <label className="label">Or type the code shown under the QR</label>
         <div className="flex gap-2">
           <input className="field font-mono" value={manual} onChange={(e) => setManual(e.target.value)} placeholder={placeholder} />
           <button type="submit" className="btn btn-ghost">Check in</button>
         </div>
-      </form>
+      </form>}
     </div>
   );
 }

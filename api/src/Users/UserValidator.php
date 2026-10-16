@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace YouthSync\Users;
 
+use YouthSync\Auth\Password;
+
 final class UserValidator
 {
     public const ALLOWED_ROLES = ['SK_OFFICIAL'];

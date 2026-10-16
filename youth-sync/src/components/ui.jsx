@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useStore } from '../store.jsx';
+import { useEffect, useRef, useState } from 'react';
+import { useStore, useStoreData } from '../store.jsx';
 
 const TONE = {
   success: 'bg-success-bg text-success',
@@ -21,6 +21,7 @@ const STATUS_TONE = {
   registered: 'info', applied: 'info', ongoing: 'info', 'under review': 'info', excused: 'info',
   free: 'neutral', draft: 'neutral', cancelled: 'neutral', archived: 'neutral', closed: 'neutral',
   'not registered': 'neutral', inactive: 'neutral', refunded: 'neutral', low: 'neutral',
+  'account ready': 'warning',
 };
 
 const titleCase = (value) => String(value).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
@@ -78,6 +79,15 @@ export function Empty({ title = 'No records found.', body, children }) {
 }
 
 /** Shown while a list is being prepared, instead of a blank screen. */
+/**
+ * Shows `children` once the store has loaded the whole collections they read
+ * (see useStoreData); a skeleton until then.
+ */
+export function NeedsStoreData({ keys, children, rows = 6 }) {
+  const ready = useStoreData(...keys);
+  return ready ? children : <Skeleton rows={rows} />;
+}
+
 export function Skeleton({ rows = 5 }) {
   return (
     <div className="card divide-y divide-line" aria-busy="true" aria-live="polite">
@@ -94,23 +104,46 @@ export function Skeleton({ rows = 5 }) {
   );
 }
 
-/** Result count plus previous/next, for lists that grow past one screen. */
-export function Pagination({ page, pageSize, total, onPage, noun = 'records' }) {
-  const pages = Math.max(1, Math.ceil(total / pageSize));
-  if (total === 0) return null;
-  const from = (page - 1) * pageSize + 1;
+/**
+ * Result count plus previous/next, for lists that grow past one screen.
+ * `total` and `totalPages` come from the API. Buttons are disabled while a
+ * page is loading, so rapid clicks cannot queue duplicate requests, and they
+ * never move below page 1 or past the last page. `pageSizes` + `onPageSize`
+ * add an optional rows-per-page picker.
+ */
+export function Pagination({
+  page, pageSize, total, totalPages, onPage, noun = 'records', loading = false, pageSizes, onPageSize,
+}) {
+  const pages = Math.max(1, Number(totalPages) || Math.ceil(total / pageSize) || 1);
+  if (!total) return null;
+  const from = Math.min(total, (page - 1) * pageSize + 1);
   const to = Math.min(total, page * pageSize);
+  const go = (next) => {
+    if (loading || next < 1 || next > pages || next === page) return;
+    onPage(next);
+  };
 
   return (
     <div className="mt-4 flex flex-col items-center justify-between gap-3 sm:flex-row">
-      <p className="t-help">Showing {from}–{to} of {total.toLocaleString()} {noun}</p>
-      {pages > 1 && (
-        <div className="flex items-center gap-1">
-          <button type="button" className="btn btn-secondary btn-sm" disabled={page === 1} onClick={() => onPage(page - 1)}>Previous</button>
-          <span className="px-2 t-help">Page {page} of {pages}</span>
-          <button type="button" className="btn btn-secondary btn-sm" disabled={page === pages} onClick={() => onPage(page + 1)}>Next</button>
-        </div>
-      )}
+      <p className="t-help">Showing {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()} {noun}</p>
+      <div className="flex flex-wrap items-center gap-3">
+        {onPageSize && Array.isArray(pageSizes) && pageSizes.length > 1 && (
+          <label className="flex items-center gap-2 t-help">
+            Rows per page
+            <select className="field !w-20 !py-1 !text-xs" value={pageSize} disabled={loading}
+              onChange={(e) => onPageSize(Number(e.target.value))}>
+              {pageSizes.map((size) => <option key={size} value={size}>{size}</option>)}
+            </select>
+          </label>
+        )}
+        {pages > 1 && (
+          <div className="flex items-center gap-1">
+            <button type="button" className="btn btn-secondary btn-sm" disabled={loading || page <= 1} onClick={() => go(page - 1)}>Previous</button>
+            <span className="px-2 t-help">Page {page} of {pages}</span>
+            <button type="button" className="btn btn-secondary btn-sm" disabled={loading || page >= pages} onClick={() => go(page + 1)}>Next</button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -171,11 +204,13 @@ export function Tabs({ items, active, onSelect }) {
 
 export function Flash() {
   const { flash, clearFlash } = useStore();
+  const clearRef = useRef(clearFlash);
+  clearRef.current = clearFlash;
   useEffect(() => {
     if (!flash) return undefined;
-    const timer = setTimeout(clearFlash, 6000);
+    const timer = setTimeout(() => clearRef.current?.(), 6000);
     return () => clearTimeout(timer);
-  }, [flash, clearFlash]);
+  }, [flash]);
 
   if (!flash) return null;
   const styles = flash.tone === 'warning'
@@ -190,7 +225,7 @@ export function Flash() {
   return (
     <div aria-live="polite"
       className="pointer-events-none fixed inset-x-3 bottom-3 z-[60] flex justify-center sm:inset-x-auto sm:bottom-auto sm:right-5 sm:top-20 sm:justify-end">
-      <div className={`pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-card border px-4 py-3 text-sm shadow-lg ${styles}`}>
+      <div className={`ys-flash pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-card border px-4 py-3 text-sm shadow-lg ${styles}`}>
         <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-white/70 text-xs font-bold">{icon}</span>
         <span className="flex-1">{flash.message}</span>
         <button type="button" onClick={clearFlash} aria-label="Dismiss" className="font-bold opacity-60">×</button>
@@ -210,10 +245,10 @@ export function Table({ head, children, minWidth = 720 }) {
   );
 }
 
-export function Confirm({ message, onConfirm, children, className = 'btn btn-ghost' }) {
+export function Confirm({ message, onConfirm, children, className = 'btn btn-ghost', disabled = false }) {
   return (
-    <button type="button" className={className}
-      onClick={() => { if (window.confirm(message)) onConfirm(); }}>
+    <button type="button" className={className} disabled={disabled}
+      onClick={() => { if (disabled) return; if (window.confirm(message)) onConfirm(); }}>
       {children}
     </button>
   );

@@ -5,7 +5,8 @@ import { GuestLayout } from '../components/layouts.jsx';
 import { Badge, Field } from '../components/ui.jsx';
 import EducationFields from '../components/education.jsx';
 import { TagInput, CheckboxGroup } from '../components/tags.jsx';
-import { digitsOnly, validateContact } from '../lib/validation.js';
+import { digitsOnly, validateContact, validatePassword } from '../lib/validation.js';
+import { api } from '../lib/api.js';
 import {
   APP_NAME, MUNICIPALITIES, INTEREST_OPTIONS, SKILL_OPTIONS, ACTIVITY_OPTIONS,
 } from '../data/mock.js';
@@ -792,7 +793,7 @@ export function Login() {
   const [busy, setBusy] = useState(false);
   const [remember, setRemember] = useState(false);
 
-  if (sessionReady === false) {
+  if (sessionReady !== true) {
     return <GuestLayout><p className="text-sm text-ink-muted">Checking your session…</p></GuestLayout>;
   }
   if (user) {
@@ -810,8 +811,12 @@ export function Login() {
     setError('');
     setBusy(true);
 
+    const formData = new FormData(event.currentTarget);
+    const submittedEmail = String(formData.get('email') ?? email).trim();
+    const submittedPassword = String(formData.get('password') ?? password);
+
     try {
-      const result = await login(email, password, remember);
+      const result = await login(submittedEmail, submittedPassword, remember);
 
       if (result.error) {
         setError(result.error);
@@ -991,6 +996,7 @@ export function Login() {
                   <input
                     className="field"
                     type="email"
+                    name="email"
                     value={email}
                     onChange={(event) => setEmail(event.target.value)}
                     placeholder="you@example.com"
@@ -1006,6 +1012,7 @@ export function Login() {
                     <input
                       className="field pr-16"
                       type={show ? 'text' : 'password'}
+                      name="password"
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
                       placeholder="Enter your password"
@@ -1098,41 +1105,81 @@ export function Login() {
 
 export function Register() {
   const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    setFieldErrors({});
+    const data = new FormData(event.currentTarget);
+    const body = {
+      barangay: String(data.get('barangay') ?? '').trim(),
+      municipality: String(data.get('municipality') ?? '').trim(),
+      province: String(data.get('province') ?? '').trim(),
+      chairperson: String(data.get('chairperson') ?? '').trim(),
+      email: String(data.get('email') ?? '').trim(),
+      contact: String(data.get('contact') ?? '').trim(),
+      ownerName: String(data.get('ownerName') ?? '').trim(),
+      ownerEmail: String(data.get('ownerEmail') ?? '').trim(),
+      ownerPassword: String(data.get('ownerPassword') ?? ''),
+      confirmPassword: String(data.get('confirmPassword') ?? ''),
+      acceptTerms: data.get('acceptTerms') === 'on',
+      acceptPrivacy: data.get('acceptPrivacy') === 'on',
+    };
+    try {
+      await api.post('/auth/register', body);
+      navigate('/register/pending');
+    } catch (err) {
+      const fields = err?.fields && typeof err.fields === 'object' ? err.fields : {};
+      setFieldErrors(fields);
+      setError(err?.message || 'Registration could not be submitted.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <GuestLayout>
       <div className="card p-6">
         <h1 className="text-lg font-bold text-navy-900">Register your SK organization</h1>
         <p className="mt-1 text-sm text-[#7A889B]">Your account stays pending until the system administrator verifies the organization.</p>
-        <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); navigate('/register/pending'); }}>
-          <fieldset className="space-y-4">
+        {error && <p className="mt-4 rounded-card border border-[#F0D3D1] bg-[#FCF3F2] px-4 py-3 text-sm text-[#96201A]">{error}</p>}
+        <form className="mt-6 space-y-6" onSubmit={submit}>
+          <fieldset className="space-y-4" disabled={busy}>
             <legend className="text-sm font-semibold text-navy-900">Organization information</legend>
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Barangay name"><input className="field" required /></Field>
-              <Field label="Municipality">
-                <input className="field" list="municipalities" required />
+              <Field label="Barangay name" error={fieldErrors.barangay}><input className="field" name="barangay" required /></Field>
+              <Field label="Municipality" error={fieldErrors.municipality}>
+                <input className="field" name="municipality" list="municipalities" required />
                 <datalist id="municipalities">{MUNICIPALITIES.map((m) => <option key={m} value={m} />)}</datalist>
               </Field>
-              <Field label="Province"><input className="field" defaultValue="Laguna" required /></Field>
-              <Field label="SK chairperson"><input className="field" required /></Field>
-              <Field label="Official email"><input className="field" type="email" required /></Field>
-              <Field label="Contact number"><input className="field" required /></Field>
+              <Field label="Province" error={fieldErrors.province}><input className="field" name="province" defaultValue="Laguna" required /></Field>
+              <Field label="SK chairperson" error={fieldErrors.chairperson}><input className="field" name="chairperson" required /></Field>
+              <Field label="Official email" error={fieldErrors.email}><input className="field" name="email" type="email" required /></Field>
+              <Field label="Contact number" error={fieldErrors.contact}><input className="field" name="contact" required /></Field>
             </div>
           </fieldset>
-          <fieldset className="space-y-4">
+          <fieldset className="space-y-4" disabled={busy}>
             <legend className="text-sm font-semibold text-navy-900">Your account</legend>
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Full name"><input className="field" required /></Field>
-              <Field label="Email"><input className="field" type="email" required /></Field>
-              <Field label="Password"><input className="field" type="password" required /></Field>
-              <Field label="Confirm password"><input className="field" type="password" required /></Field>
+              <Field label="Full name" error={fieldErrors.ownerName}><input className="field" name="ownerName" required /></Field>
+              <Field label="Email" error={fieldErrors.ownerEmail}><input className="field" name="ownerEmail" type="email" required /></Field>
+              <Field label="Password" error={fieldErrors.ownerPassword}><input className="field" name="ownerPassword" type="password" required /></Field>
+              <Field label="Confirm password" error={fieldErrors.confirmPassword}><input className="field" name="confirmPassword" type="password" required /></Field>
             </div>
             <p className="text-xs text-[#8391A4]">At least 8 characters, with letters and numbers.</p>
           </fieldset>
           <div className="space-y-2 text-sm text-[#4A5B70]">
-            <label className="flex items-start gap-2"><input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-[#C7D0DA]" required /> I accept the Terms and Conditions.</label>
-            <label className="flex items-start gap-2"><input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-[#C7D0DA]" required /> I accept the Privacy Policy.</label>
+            <label className="flex items-start gap-2"><input type="checkbox" name="acceptTerms" className="mt-0.5 h-4 w-4 rounded border-[#C7D0DA]" required disabled={busy} /> I accept the Terms and Conditions.</label>
+            {fieldErrors.acceptTerms && <p className="text-xs font-medium text-[#96201A]">{fieldErrors.acceptTerms}</p>}
+            <label className="flex items-start gap-2"><input type="checkbox" name="acceptPrivacy" className="mt-0.5 h-4 w-4 rounded border-[#C7D0DA]" required disabled={busy} /> I accept the Privacy Policy.</label>
+            {fieldErrors.acceptPrivacy && <p className="text-xs font-medium text-[#96201A]">{fieldErrors.acceptPrivacy}</p>}
           </div>
-          <button type="submit" className="btn btn-primary w-full">Submit registration</button>
+          <button type="submit" className="btn btn-primary w-full" disabled={busy}>{busy ? 'Submitting…' : 'Submit registration'}</button>
         </form>
       </div>
     </GuestLayout>
@@ -1157,16 +1204,101 @@ export function Pending() {
 
 export function ForgotPassword() {
   const [sent, setSent] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    const email = String(new FormData(event.currentTarget).get('email') || '').trim();
+    try {
+      await api.post('/auth/forgot-password', { email });
+      setSent(true);
+    } catch (err) {
+      setError(err?.message || 'The reset request could not be sent. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <GuestLayout>
       <div className="card p-6">
         <h1 className="text-lg font-bold text-navy-900">Forgot your password?</h1>
-        <p className="mt-1 text-sm text-[#7A889B]">Enter your email and we will create a reset link for you.</p>
-        {sent && <p className="mt-4 rounded-card border border-line bg-shell px-4 py-3 text-sm text-navy-700">Reset link created. In the real build this is emailed to you.</p>}
-        <form className="mt-5 space-y-4" onSubmit={(e) => { e.preventDefault(); setSent(true); }}>
-          <Field label="Email"><input className="field" type="email" required /></Field>
-          <button type="submit" className="btn btn-primary w-full">Create reset link</button>
+        <p className="mt-1 text-sm text-[#7A889B]">Enter your email and we will send reset instructions when email delivery is configured.</p>
+        {sent && (
+          <p className="mt-4 rounded-card border border-line bg-shell px-4 py-3 text-sm text-navy-700">
+            If an account exists for that email, password reset instructions have been sent.
+          </p>
+        )}
+        {error && <p className="mt-4 rounded-card border border-[#F0D3D1] bg-[#FCF3F2] px-4 py-3 text-sm text-[#96201A]">{error}</p>}
+        <form className="mt-5 space-y-4" onSubmit={submit}>
+          <Field label="Email"><input className="field" name="email" type="email" required disabled={busy} /></Field>
+          <button type="submit" className="btn btn-primary w-full" disabled={busy}>{busy ? 'Sending…' : 'Send reset instructions'}</button>
         </form>
+        <p className="mt-4 text-sm">
+          <Link to="/reset-password" className="text-navy-700 underline">Enter a reset token</Link>
+          {' · '}
+          <Link to="/login" className="text-navy-700 underline">Back to log in</Link>
+        </p>
+      </div>
+    </GuestLayout>
+  );
+}
+
+export function ResetPassword() {
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const params = new URLSearchParams(window.location.search);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    const data = new FormData(event.currentTarget);
+    const token = String(data.get('token') || '').trim();
+    const password = String(data.get('password') || '');
+    const confirm = String(data.get('confirm') || '');
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      setError(passwordError);
+      setBusy(false);
+      return;
+    }
+    if (password !== confirm) {
+      setError('The two passwords do not match.');
+      setBusy(false);
+      return;
+    }
+    try {
+      await api.post('/auth/reset-password', { token, newPassword: password });
+      setDone(true);
+    } catch (err) {
+      setError(err?.message || 'This reset link is invalid or has expired.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <GuestLayout>
+      <div className="card p-6">
+        <h1 className="text-lg font-bold text-navy-900">Choose a new password</h1>
+        <p className="mt-1 text-sm text-[#7A889B]">Paste the reset token from your email. Each token works once.</p>
+        {done && <p className="mt-4 rounded-card border border-line bg-shell px-4 py-3 text-sm text-navy-700">Your password was updated. You can log in with it now.</p>}
+        {error && <p className="mt-4 rounded-card border border-[#F0D3D1] bg-[#FCF3F2] px-4 py-3 text-sm text-[#96201A]">{error}</p>}
+        {!done && (
+          <form className="mt-5 space-y-4" onSubmit={submit}>
+            <Field label="Reset token"><input className="field" name="token" defaultValue={params.get('token') || ''} required disabled={busy} /></Field>
+            <Field label="New password"><input className="field" name="password" type="password" required disabled={busy} /></Field>
+            <Field label="Confirm password"><input className="field" name="confirm" type="password" required disabled={busy} /></Field>
+            <button type="submit" className="btn btn-primary w-full" disabled={busy}>{busy ? 'Saving…' : 'Update password'}</button>
+          </form>
+        )}
         <p className="mt-4 text-sm"><Link to="/login" className="text-navy-700 underline">Back to log in</Link></p>
       </div>
     </GuestLayout>
@@ -1209,7 +1341,8 @@ export function YouthSignup() {
   const goToOtp = async (event) => {
     event.preventDefault();
     setError('');
-    if (values.password.length < 8) { setError('Use a password of at least 8 characters.'); return; }
+    const passwordError = validatePassword(values.password);
+    if (passwordError) { setError(passwordError); return; }
     if (values.password !== values.confirm) { setError('The two passwords do not match.'); return; }
     const result = await startSignup(values);
     if (result.error) { setError(result.error); return; }
@@ -1294,6 +1427,10 @@ export function YouthSignup() {
             e.preventDefault();
             const problem = validateContact(values.mobile);
             if (problem) { setMobileError(problem); return; }
+            if (!/^[^@\s]+@gmail\.com$/i.test(values.email.trim())) {
+              setError('Use your Gmail address, like name@gmail.com.');
+              return;
+            }
             setMobileError(''); setError(''); setStep(3);
           }}>
             <Field label="Your SK barangay" hint="Your applications go to this SK council.">
@@ -1308,7 +1445,9 @@ export function YouthSignup() {
                 value={values.mobile} placeholder="09171234567"
                 onChange={(e) => setValues((x) => ({ ...x, mobile: digitsOnly(e.target.value) }))} required />
             </Field>
-            <Field label="Email address"><input className="field" type="email" value={values.email} onChange={set('email')} required /></Field>
+            <Field label="Gmail address" hint="Use the Gmail account you can open. If this address already has a YouthSync account, sign in instead.">
+              <input className="field" type="email" value={values.email} onChange={set('email')} placeholder="name@gmail.com" required />
+            </Field>
             <div className="flex gap-3">
               <button type="button" className="btn btn-ghost" onClick={() => setStep(1)}>Back</button>
               <button type="submit" className="btn btn-primary flex-1">Continue</button>
@@ -1318,7 +1457,7 @@ export function YouthSignup() {
 
         {step === 3 && (
           <form className="mt-5 space-y-4" onSubmit={goToOtp}>
-            <Field label="Create a password" hint="At least 8 characters.">
+            <Field label="Create a password" hint="At least 8 characters, with 1 capital letter and 1 lowercase letter.">
               <input className="field" type="password" value={values.password} onChange={set('password')} required />
             </Field>
             <Field label="Confirm password">
@@ -1391,7 +1530,8 @@ export function ChangePassword() {
   const submit = async (event) => {
     event.preventDefault();
     if (!currentPassword) { setError('Current password is required.'); return; }
-    if (password.length < 8) { setError('Use a password of at least 8 characters.'); return; }
+    const passwordError = validatePassword(password);
+    if (passwordError) { setError(passwordError); return; }
     if (password !== confirm) { setError('The two passwords do not match.'); return; }
     const ok = await changePassword(password, currentPassword);
     if (ok) navigate(user.role === 'youth' ? '/youth' : '/sk', { replace: true });

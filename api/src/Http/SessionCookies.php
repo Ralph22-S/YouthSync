@@ -18,14 +18,32 @@ final class SessionCookies
             $sameSite = 'Lax';
         }
 
+        // Never mark the session cookie Secure on plain HTTP. Chrome will set
+        // SameSite=None; Secure from a localhost PHP response, then refuse to
+        // send that cookie on the next document load of http://localhost:5173.
+        $https = self::requestIsHttps();
+        $secure = $https && (bool) ($config['session_secure'] ?? false);
+        if (!$https && $sameSite === 'None') {
+            $sameSite = 'Lax';
+        }
+
         return [
             'lifetime' => max(0, $lifetime),
             'path' => '/',
             'domain' => '',
-            'secure' => (bool) ($config['session_secure'] ?? false),
+            'secure' => $secure,
             'httponly' => true,
             'samesite' => $sameSite,
         ];
+    }
+
+    private static function requestIsHttps(): bool
+    {
+        $https = $_SERVER['HTTPS'] ?? '';
+        if (is_string($https) && $https !== '' && strtolower($https) !== 'off') {
+            return true;
+        }
+        return (int) ($_SERVER['SERVER_PORT'] ?? 80) === 443;
     }
 
     public static function token(): string
@@ -49,20 +67,16 @@ final class SessionCookies
         ]);
     }
 
-    /**
-     * Remember-me is set from a cross-origin fetch (Vite :5173/:5175 → Apache :80).
-     * Chrome will not persist SameSite=Lax cookies from that response. Localhost is a
-     * secure context, so SameSite=None; Secure is valid on http://localhost.
-     */
     public static function writeRemember(string $value, array $config, int $expires): void
     {
+        $params = self::params($config, 0);
         setcookie(self::REMEMBER_COOKIE, $value, [
             'expires' => $expires,
             'path' => '/',
             'domain' => '',
-            'secure' => true,
+            'secure' => (bool) $params['secure'],
             'httponly' => true,
-            'samesite' => 'None',
+            'samesite' => (string) $params['samesite'],
         ]);
     }
 }

@@ -1,16 +1,19 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useStore } from '../../store.jsx';
 import { PageHeader } from '../../components/layouts.jsx';
-import { Badge, Confirm, Empty, Field, FormErrors, Section, Stat, Table } from '../../components/ui.jsx';
+import { Badge, Confirm, Empty, Field, FormErrors, Pagination, Stat, Table } from '../../components/ui.jsx';
 import { validateUser, digitsOnly, hasErrors, CONTACT_LENGTH } from '../../lib/validation.js';
 import { FilterBar, SORT_NEWEST } from '../../components/filters.jsx';
+import { mapSkUser } from '../../lib/mappers.js';
+import { pageSizesFor, useDebouncedValue, usePagedList } from '../../lib/usePagedList.js';
 
 const ROLES = { sk_official: 'SK official', youth: 'Youth' };
 const EMPTY = { name: '', email: '', mobile: '', role: 'sk_official', password: '' };
 
 export default function Users() {
-  const { users, org, usage, limits, saveUser, toggleUserActive, deleteUser, user: me } = useStore();
-  const [query, setQuery] = useState('');
+  const { org, usage, limits, saveUser, toggleUserActive, deleteUser, user: me, dataVersion } = useStore();
+  const [search, setSearch] = useState('');
+  const query = useDebouncedValue(search.trim(), 300);
   const [role, setRole] = useState('');
   const [status, setStatus] = useState('');
   const [sort, setSort] = useState('newest');
@@ -18,21 +21,21 @@ export default function Users() {
   const [errors, setErrors] = useState({});
   const [editing, setEditing] = useState(null);
 
-  const team = useMemo(() => users
-    .filter((u) => u.orgId === org?.id)
-    // Newest first: accounts created in this session carry a createdAt stamp.
-    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id), [users, org]);
-
-  const ordered = (rows) => {
-    if (sort === 'name') return [...rows].sort((a, b) => a.name.localeCompare(b.name));
-    if (sort === 'oldest') return [...rows].reverse();
-    return rows;
-  };
-
-  const rows = ordered(team
-    .filter((u) => (role ? u.role === role : true))
-    .filter((u) => (status ? (status === 'active' ? u.active : !u.active) : true))
-    .filter((u) => `${u.name} ${u.email}`.toLowerCase().includes(query.toLowerCase())));
+  // GET /sk/users: name/email search, status, sort and paging on the server.
+  // Saving, deactivating or deleting reloads the store, which bumps dataVersion
+  // and refetches the page shown here.
+  const list = usePagedList('/sk/users', {
+    q: query || undefined,
+    status: status || undefined,
+    role: role || undefined,
+    sort,
+  }, { perPage: 25, enabled: dataVersion > 0, refreshKey: dataVersion, errorMessage: 'Unable to load user accounts.' });
+  const rows = list.rows.map((row) => mapSkUser(row, org?.id));
+  // Organization totals (before search and filters) for the summary cards.
+  const counts = list.data?.counts || {};
+  const count = (key) => (list.data ? Number(counts[key]) || 0 : '…');
+  const filtered = Boolean(query || role || status);
+  const resetFilters = () => { setSearch(''); setRole(''); setStatus(''); setSort('newest'); };
 
   const set = (key) => (event) => {
     const value = key === 'mobile' ? digitsOnly(event.target.value) : event.target.value;
@@ -52,7 +55,9 @@ export default function Users() {
   const submit = async (event) => {
     event.preventDefault();
 
-    const taken = users
+    // Quick check against the accounts on screen; the API rejects any other
+    // duplicate email (409) and the message is shown.
+    const taken = rows
       .filter((u) => u.id !== editing)
       .map((u) => u.email.toLowerCase());
 
@@ -66,12 +71,12 @@ export default function Users() {
   return (
     <>
       <PageHeader title="User management"
-        subtitle={`${team.length} account(s) in ${org?.name ?? 'this organization'}`} />
+        subtitle={`${count('all')} account(s) in ${org?.name ?? 'this organization'}`} />
 
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Total accounts" value={team.length} />
-        <Stat label="Active" value={team.filter((u) => u.active).length} />
-        <Stat label="Deactivated" value={team.filter((u) => !u.active).length} />
+        <Stat label="Total accounts" value={count('all')} />
+        <Stat label="Active" value={count('active')} />
+        <Stat label="Deactivated" value={count('inactive')} />
         <Stat label="Staff slots used" value={`${usage.accounts} / ${limits.accounts ?? '∞'}`} />
       </div>
 
@@ -106,9 +111,9 @@ export default function Users() {
         </form>
 
         <div className="lg:col-span-2">
-          <FilterBar search={query} onSearch={setQuery} placeholder="Name or email"
+          <FilterBar search={search} onSearch={setSearch} placeholder="Name or email"
             sort={{ value: sort, onChange: setSort, options: SORT_NEWEST }}
-            onReset={() => { setQuery(''); setRole(''); setStatus(''); setSort('newest'); }}>
+            onReset={resetFilters}>
             <Field label="Role">
               <select className="field" value={role} onChange={(e) => setRole(e.target.value)}>
                 <option value="">All roles</option>
@@ -124,9 +129,23 @@ export default function Users() {
             </Field>
           </FilterBar>
 
-          {rows.length === 0 ? (
-            <Empty title="No accounts match this filter" body="Clear the search or add a new user from the form." />
+          {list.error ? (
+            <Empty title="User accounts could not be loaded" body={list.error}>
+              <button type="button" className="btn btn-primary" onClick={list.reload}>Retry</button>
+            </Empty>
+          ) : !list.data ? (
+            <Empty title="Loading user accounts" body="Fetching the accounts in your organization." />
+          ) : rows.length === 0 ? (
+            filtered ? (
+              <Empty title="No results found" body="No accounts match this search or these filters.">
+                <button type="button" className="btn btn-ghost" onClick={resetFilters}>Reset filters</button>
+              </Empty>
+            ) : (
+              <Empty title="No user accounts yet" body="Add a user from the form." />
+            )
           ) : (
+            <>
+            {list.loading && <p className="mb-2 text-sm text-[#5A6C82]">Loading user accounts…</p>}
             <Table head={['Name', 'Role', 'Mobile', 'Status', 'Actions']} minWidth={620}>
               {rows.map((account) => (
                 <tr key={account.id} className="hover:bg-shell">
@@ -159,6 +178,10 @@ export default function Users() {
                 </tr>
               ))}
             </Table>
+            <Pagination page={list.page} pageSize={list.perPage} total={list.total} totalPages={list.totalPages}
+              onPage={list.setPage} loading={list.loading} noun="accounts"
+              pageSizes={pageSizesFor(25)} onPageSize={list.setPerPage} />
+            </>
           )}
         </div>
       </div>

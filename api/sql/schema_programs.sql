@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS programs (
   organization_id INT UNSIGNED NOT NULL,
   kind VARCHAR(16) NOT NULL DEFAULT 'program',
   name VARCHAR(160) NOT NULL,
+  registration_code VARCHAR(16) NULL DEFAULT NULL,
   category VARCHAR(80) NOT NULL DEFAULT '',
   status VARCHAR(32) NOT NULL DEFAULT 'draft',
   scheduled_on DATE NOT NULL,
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS programs (
   KEY idx_programs_org_kind (organization_id, kind),
   KEY idx_programs_org_status (organization_id, status),
   KEY idx_programs_org_scheduled (organization_id, scheduled_on),
+  UNIQUE KEY uq_programs_registration_code (registration_code),
   KEY idx_programs_org_name_date (organization_id, name, scheduled_on),
   CONSTRAINT fk_programs_organization FOREIGN KEY (organization_id)
     REFERENCES organizations (id) ON UPDATE CASCADE ON DELETE RESTRICT

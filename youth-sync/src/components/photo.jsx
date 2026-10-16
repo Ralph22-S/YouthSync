@@ -1,9 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { MAX_UPLOAD_BYTES } from '../data/mock.js';
+import { mediaSrc } from '../lib/api.js';
 
 const readable = (bytes) => (bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`);
 
-/** Shrinks a capture or upload so a data URL fits comfortably in localStorage. */
+function fileFromDataUrl(dataUrl, name) {
+  const parts = String(dataUrl).split(',');
+  const mime = /data:([^;]+)/.exec(parts[0])?.[1] || 'image/jpeg';
+  const binary = atob(parts[1] || '');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  const base = String(name || 'photo').replace(/\.[^.]+$/, '') || 'photo';
+  return new File([bytes], `${base}.jpg`, { type: mime || 'image/jpeg' });
+}
+
+/** Shrinks a capture or upload before it is sent to the API. The data URL is only a preview. */
 function downscale(dataUrl, maxSide = 640) {
   return new Promise((resolve) => {
     const image = new Image();
@@ -20,6 +31,21 @@ function downscale(dataUrl, maxSide = 640) {
     image.onerror = () => resolve(dataUrl);
     image.src = dataUrl;
   });
+}
+
+/**
+ * Youth profile photo only. A 2x2-style square. Wider or taller originals are
+ * cropped with object-fit, not stretched.
+ */
+export function ProfilePhoto({ src, alt = 'Profile photo', className = '' }) {
+  if (!src) return null;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={`aspect-square w-full max-w-[10rem] rounded-lg border border-line object-cover object-center ${className}`}
+    />
+  );
 }
 
 /**
@@ -57,7 +83,8 @@ export default function PhotoField({ value, onChange, onRemove, label = 'Profile
     reader.onload = async () => {
       setError('');
       const dataUrl = await downscale(reader.result);
-      onChange({ name: file.name, type: 'image/jpeg', size: dataUrl.length, dataUrl });
+      const stored = fileFromDataUrl(dataUrl, file.name);
+      onChange({ name: stored.name, type: stored.type || 'image/jpeg', size: stored.size, dataUrl, file: stored });
     };
     reader.readAsDataURL(file);
   };
@@ -88,9 +115,12 @@ export default function PhotoField({ value, onChange, onRemove, label = 'Profile
     canvas.getContext('2d')?.drawImage(element, 0, 0, canvas.width, canvas.height);
 
     const dataUrl = await downscale(canvas.toDataURL('image/jpeg', 0.85));
-    onChange({ name: `photo-${Date.now()}.jpg`, type: 'image/jpeg', size: dataUrl.length, dataUrl });
+    const stored = fileFromDataUrl(dataUrl, `photo-${Date.now()}.jpg`);
+    onChange({ name: stored.name, type: 'image/jpeg', size: stored.size, dataUrl, file: stored });
     stopCamera();
   };
+
+  const preview = mediaSrc(value);
 
   return (
     <div>
@@ -105,12 +135,12 @@ export default function PhotoField({ value, onChange, onRemove, label = 'Profile
             <button type="button" className="btn btn-ghost" onClick={stopCamera}>Cancel</button>
           </div>
         </div>
-      ) : value?.dataUrl ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-shell p-3">
-          <img src={value.dataUrl} alt="Profile" className="h-20 w-20 rounded-lg border border-line object-cover" />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-navy-900">{value.name}</p>
-            <p className="text-xs text-[#8391A4]">Preview — save the form to keep it.</p>
+      ) : preview ? (
+        <div className="space-y-3 rounded-lg border border-line bg-shell p-3">
+          <ProfilePhoto src={preview} alt="Profile" />
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-navy-900">{value.name || 'Profile photo'}</p>
+            <p className="text-xs text-[#8391A4]">{value?.file ? 'Preview — save the form to keep it.' : 'Saved profile photo.'}</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => input.current?.click()}>Replace</button>

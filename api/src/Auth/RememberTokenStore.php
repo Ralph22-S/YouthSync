@@ -17,7 +17,7 @@ final class RememberTokenStore
     }
 
     /**
-     * @return array{user_id:int,organization_id:int,role_code:string,expires_at:int}|null
+     * @return array{user_id:int,organization_id:int,role_code:string,youth_id:int,expires_at:int}|null
      */
     public function findValid(string $plainToken): ?array
     {
@@ -45,9 +45,14 @@ final class RememberTokenStore
                 'user_id' => (int) ($row['user_id'] ?? 0),
                 'organization_id' => (int) ($row['organization_id'] ?? 0),
                 'role_code' => (string) ($row['role_code'] ?? ''),
+                'youth_id' => (int) ($row['youth_id'] ?? 0),
                 'expires_at' => $expires,
             ];
-            if ($match['user_id'] < 1 || $match['organization_id'] < 1) {
+            $adminRemember = $match['role_code'] === AuthService::ROLE_SYSTEM_ADMIN && $match['organization_id'] === 0;
+            $youthRemember = $match['role_code'] === AuthService::ROLE_YOUTH
+                && $match['organization_id'] === 0
+                && $match['youth_id'] > 0;
+            if ($match['user_id'] < 1 || (!$adminRemember && !$youthRemember && $match['organization_id'] < 1)) {
                 unset($records[$hash]);
                 $changed = true;
                 $match = null;
@@ -58,14 +63,15 @@ final class RememberTokenStore
         return $match;
     }
 
-    public function put(string $plainToken, int $userId, int $organizationId, string $roleCode, int $expiresAt): void
+    public function put(string $plainToken, int $userId, int $organizationId, string $roleCode, int $expiresAt, int $youthId = 0): void
     {
         $hash = hash('sha256', $plainToken);
-        $this->mutate(function (array $records) use ($hash, $userId, $organizationId, $roleCode, $expiresAt): array {
+        $this->mutate(function (array $records) use ($hash, $userId, $organizationId, $roleCode, $expiresAt, $youthId): array {
             $records[$hash] = [
                 'user_id' => $userId,
                 'organization_id' => $organizationId,
                 'role_code' => $roleCode,
+                'youth_id' => $youthId,
                 'expires_at' => $expiresAt,
             ];
             return $records;

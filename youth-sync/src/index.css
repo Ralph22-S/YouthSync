@@ -164,3 +164,12 @@ section.card { border-radius: 14px; }
   .login-form-panel { padding: 32px 22px; min-height: 620px; }
 }
 .guest-auth > .card { max-width: 760px; margin-left: auto; margin-right: auto; }
+
+.ys-flash {
+  animation: ys-flash-in 0.22s ease-out;
+}
+
+@keyframes ys-flash-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

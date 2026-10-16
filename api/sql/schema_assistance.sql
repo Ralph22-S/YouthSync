@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS assistance_programs (
 CREATE TABLE IF NOT EXISTS assistance_requirements (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
   organization_id INT UNSIGNED NOT NULL,
-  assistance_id INT UNSIGNED NOT NULL,
+  assistance_id INT UNSIGNED NULL DEFAULT NULL,
+  program_id INT UNSIGNED NULL DEFAULT NULL,
   name VARCHAR(160) NOT NULL,
   description VARCHAR(500) NOT NULL DEFAULT '',
   required TINYINT(1) NOT NULL DEFAULT 1,
@@ -62,10 +63,13 @@ CREATE TABLE IF NOT EXISTS assistance_requirements (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_assist_req_org_program (organization_id, assistance_id),
+  KEY idx_assist_req_org_activity (organization_id, program_id),
   CONSTRAINT fk_assist_req_organization FOREIGN KEY (organization_id)
     REFERENCES organizations (id) ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT fk_assist_req_program FOREIGN KEY (assistance_id)
-    REFERENCES assistance_programs (id) ON UPDATE CASCADE ON DELETE RESTRICT
+    REFERENCES assistance_programs (id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT fk_assist_req_activity FOREIGN KEY (program_id)
+    REFERENCES programs (id) ON UPDATE CASCADE ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS beneficiaries (

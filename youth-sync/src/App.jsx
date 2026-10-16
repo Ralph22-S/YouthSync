@@ -1,11 +1,11 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { SkLayout, AdminLayout, YouthLayout } from './components/layouts.jsx';
-import { Landing, Login, Register, Pending, ForgotPassword, YouthSignup, ChangePassword } from './pages/public.jsx';
+import { Landing, Login, Register, Pending, ForgotPassword, ResetPassword, YouthSignup, ChangePassword } from './pages/public.jsx';
 import Dashboard from './pages/sk/Dashboard.jsx';
 import { YouthList, YouthDetail, YouthForm, YouthImport } from './pages/sk/Youth.jsx';
 import { AssistanceList, AssistanceDetail, AssistanceForm } from './pages/sk/Assistance.jsx';
 import { ProgramList, ProgramDetail, ProgramForm } from './pages/sk/Programs.jsx';
-import { Notifications, Reports, Subscription, Plans, Checkout, Settings } from './pages/sk/Misc.jsx';
+import { Notifications, Reports, Subscription, Plans, Checkout, PaymentReturn, Settings } from './pages/sk/Misc.jsx';
 import { ApplicationQueue, ApplicationReview } from './pages/sk/Applications.jsx';
 import Attendance from './pages/sk/Attendance.jsx';
 import SkUsers from './pages/sk/Users.jsx';
@@ -32,6 +32,7 @@ export default function App() {
       <Route path="/register" element={<Register />} />
       <Route path="/register/pending" element={<Pending />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/change-password" element={<ChangePassword />} />
 
       {/* Youth */}
@@ -81,6 +82,8 @@ export default function App() {
         <Route path="billing" element={<Billing />} />
         <Route path="subscription/plans" element={<Plans />} />
         <Route path="subscription/checkout" element={<Checkout />} />
+        <Route path="subscription/payment/success" element={<PaymentReturn kind="success" />} />
+        <Route path="subscription/payment/cancel" element={<PaymentReturn kind="cancel" />} />
         <Route path="settings" element={<Settings />} />
       </Route>
 

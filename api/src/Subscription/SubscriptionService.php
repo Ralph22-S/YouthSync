@@ -4,9 +4,13 @@ declare(strict_types=1);
 namespace YouthSync\Subscription;
 
 use PDO;
-use YouthSync\Auth\AuthService;
 use YouthSync\Org\PlanLimits;
 
+/**
+ * Read model for one organization's subscription. GET /sk/subscription and
+ * GET /sk/subscription/usage (session organization only) and the admin
+ * subscription endpoints all return this same shape.
+ */
 final class SubscriptionService
 {
     public function __construct(private PDO $pdo)
@@ -21,37 +25,13 @@ final class SubscriptionService
     public function get(int $organizationId, array $membership, array $query = []): array
     {
         unset($query['organization_id'], $query['orgId'], $query['organizationId'], $query['org_id']);
-        $usage = $this->usage($organizationId, $membership, $query);
-        $org = $this->organizationRow($organizationId);
-        $storedCode = PlanLimits::storedPlanCode($org);
-        $effective = $usage['effectivePlan'];
-
-        $expiresAt = $org['expires_at'] ?? null;
-        $expiresIn = null;
-        if (is_string($expiresAt) && $expiresAt !== '') {
-            $expStmt = $this->pdo->prepare('SELECT DATEDIFF(:expires, CURDATE())');
-            $expStmt->execute(['expires' => $expiresAt]);
-            $expiresIn = (int) $expStmt->fetchColumn();
-        }
-
-        return [
-            'plan' => $storedCode,
-            'planName' => $this->storedPlanName($storedCode),
-            'status' => (string) ($org['sub_status'] ?? ''),
-            'cycle' => (string) ($org['cycle'] ?? 'none'),
-            'expiresAt' => $expiresAt,
-            'expiresIn' => $expiresIn,
-            'effectivePlan' => $effective,
-            'limits' => $usage['limits'],
-            'usage' => $usage['usage'],
-            'remaining' => $usage['remaining'],
-            'features' => [
-                'csvImport' => (bool) $effective['csv_import'],
-            ],
-        ];
+        return $this->view($organizationId);
     }
 
     /**
+     * Same payload as get(): usage is only meaningful next to the plan, status
+     * and limits it is measured against.
+     *
      * @param array<string, mixed> $membership
      * @param array<string, mixed> $query
      * @return array<string, mixed>
@@ -59,42 +39,51 @@ final class SubscriptionService
     public function usage(int $organizationId, array $membership, array $query = []): array
     {
         unset($query['organization_id'], $query['orgId'], $query['organizationId'], $query['org_id']);
+        return $this->view($organizationId);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function view(int $organizationId): array
+    {
         $org = $this->organizationRow($organizationId);
-        $plan = PlanLimits::effective($org);
+        $state = PlanLimits::state($this->pdo, $org);
+        $plan = PlanLimits::effective(['plan' => $state['plan'], 'sub_status' => $state['status']]);
+        $usage = PlanLimits::usage($this->pdo, $organizationId);
 
-        $counts = [
-            'youth' => $this->countYouth($organizationId),
-            'accounts' => $this->countSkAccounts($organizationId),
-            'programs' => $this->countPrograms($organizationId),
-            'assistance' => $this->countAssistance($organizationId),
-            'qr' => $this->qrUses($organizationId),
-        ];
-
-        $limits = [
-            'youth' => $plan['youth'],
-            'accounts' => $plan['accounts'],
-            'programs' => $plan['programs'],
-            'assistance' => $plan['assistance'],
-            'qr' => $plan['qr'],
-        ];
-
+        $limits = [];
         $remaining = [];
-        foreach ($limits as $key => $limit) {
-            $remaining[$key] = PlanLimits::remaining($limit, $counts[$key]);
+        $reached = [];
+        foreach (PlanLimits::RESOURCES as $resource) {
+            $limit = $plan[$resource];
+            $limits[$resource] = $limit;
+            $remaining[$resource] = PlanLimits::remaining($limit, $usage[$resource]);
+            $reached[$resource] = $limit !== null && $usage[$resource] >= $limit;
+        }
+        $over = [];
+        foreach (PlanLimits::RESOURCES as $resource) {
+            if ($limits[$resource] !== null && $usage[$resource] > $limits[$resource]) {
+                $over[$resource] = ['usage' => $usage[$resource], 'limit' => $limits[$resource]];
+            }
         }
 
-        return [
-            'plan' => $plan['code'],
-            'planName' => $plan['name'],
-            'status' => (string) ($org['sub_status'] ?? ''),
-            'effectivePlan' => [
-                'code' => $plan['code'],
-                'name' => $plan['name'],
-                'csv_import' => $plan['csv_import'],
-            ],
+        return $state + [
             'limits' => $limits,
-            'usage' => $counts,
+            'usage' => $usage,
             'remaining' => $remaining,
+            'reached' => $reached,
+            'overLimit' => $over === [] ? new \stdClass() : $over,
+            'features' => [
+                'csvImport' => (bool) $plan['csv_import'],
+                'excelExport' => (bool) $plan['excel_export'],
+                'activityLogs' => (bool) $plan['activity_logs'],
+            ],
+            'plans' => PlanLimits::publicCatalog(),
+            'billing' => [
+                'onlinePayment' => false,
+                'note' => PlanLimits::PRICE_NOTE,
+            ],
         ];
     }
 
@@ -104,75 +93,14 @@ final class SubscriptionService
     private function organizationRow(int $organizationId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, plan, sub_status, cycle, expires_at, qr_uses
+            'SELECT id, plan, sub_status, cycle, started_on, expires_at, qr_uses
              FROM organizations WHERE id = :id LIMIT 1'
         );
         $stmt->execute(['id' => $organizationId]);
         $row = $stmt->fetch();
-        return is_array($row) ? $row : ['plan' => 'free', 'sub_status' => 'free'];
-    }
-
-    private function storedPlanName(string $code): string
-    {
-        foreach (PlanLimits::catalog() as $plan) {
-            if ($plan['code'] === $code) {
-                return $plan['name'];
-            }
+        if (!is_array($row)) {
+            return ['id' => 0, 'plan' => 'free', 'sub_status' => 'free', 'cycle' => 'none', 'expires_at' => null];
         }
-        return 'Free';
-    }
-
-    private function countYouth(int $organizationId): int
-    {
-        $stmt = $this->pdo->prepare(
-            'SELECT COUNT(*) FROM youth WHERE organization_id = :org AND archived = 0'
-        );
-        $stmt->execute(['org' => $organizationId]);
-        return (int) $stmt->fetchColumn();
-    }
-
-    private function countSkAccounts(int $organizationId): int
-    {
-        $stmt = $this->pdo->prepare(
-            'SELECT COUNT(*) FROM organization_users ou
-             INNER JOIN users u ON u.id = ou.user_id
-             INNER JOIN roles r ON r.id = u.role_id
-             WHERE ou.organization_id = :org
-               AND ou.status = :membership
-               AND r.code = :role'
-        );
-        $stmt->execute([
-            'org' => $organizationId,
-            'membership' => 'active',
-            'role' => AuthService::ROLE_SK_OFFICIAL,
-        ]);
-        return (int) $stmt->fetchColumn();
-    }
-
-    private function countPrograms(int $organizationId): int
-    {
-        $stmt = $this->pdo->prepare(
-            "SELECT COUNT(*) FROM programs
-             WHERE organization_id = :org AND status IN ('draft', 'published', 'ongoing')"
-        );
-        $stmt->execute(['org' => $organizationId]);
-        return (int) $stmt->fetchColumn();
-    }
-
-    private function countAssistance(int $organizationId): int
-    {
-        $stmt = $this->pdo->prepare(
-            "SELECT COUNT(*) FROM assistance_programs
-             WHERE organization_id = :org AND status IN ('draft', 'open', 'full')"
-        );
-        $stmt->execute(['org' => $organizationId]);
-        return (int) $stmt->fetchColumn();
-    }
-
-    private function qrUses(int $organizationId): int
-    {
-        $stmt = $this->pdo->prepare('SELECT qr_uses FROM organizations WHERE id = :id LIMIT 1');
-        $stmt->execute(['id' => $organizationId]);
-        return (int) $stmt->fetchColumn();
+        return $row;
     }
 }

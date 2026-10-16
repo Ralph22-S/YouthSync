@@ -5,10 +5,12 @@ youth-sync/dist/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 youth-sync/.env
 youth-sync/.env.*
 !youth-sync/.env.example
+!youth-sync/.env.production.example
 
 api/logs/*
 api/storage/*

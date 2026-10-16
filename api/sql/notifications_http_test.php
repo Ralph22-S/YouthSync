@@ -32,7 +32,7 @@ if ($leftover) {
     exit(2);
 }
 
-$base = 'http://localhost/YouthSync_UI_Refresh/api';
+$base = 'http://localhost/YouthSync/api';
 $counts = static function () use ($pdo): array {
     return [
         'users' => (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn(),

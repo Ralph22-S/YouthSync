@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace YouthSync\Notifications;
 
 /**
- * Sends one email through Resend. Does not write notification rows.
+ * Sends one email through Brevo. Does not write notification rows.
  */
 final class EmailService
 {
@@ -12,7 +12,7 @@ final class EmailService
         private string $apiKey,
         private string $fromEmail,
         private string $fromName = 'YouthSync',
-        private string $baseUrl = 'https://api.resend.com',
+        private string $baseUrl = 'https://api.brevo.com',
         private ?EmailTransport $transport = null,
     ) {
     }
@@ -52,22 +52,25 @@ final class EmailService
 
         $fromEmail = self::normalizeEmail($this->fromEmail) ?? '';
         $fromName = trim($this->fromName);
-        $from = $fromName !== '' ? $fromName . ' <' . $fromEmail . '>' : $fromEmail;
+        if ($fromName === '') {
+            $fromName = 'YouthSync';
+        }
 
-        $url = rtrim($this->baseUrl, '/') . '/emails';
+        $url = rtrim($this->baseUrl, '/') . '/v3/smtp/email';
         $payload = [
-            'from' => $from,
-            'to' => [$recipient],
+            'sender' => ['name' => $fromName, 'email' => $fromEmail],
+            'to' => [['email' => $recipient]],
             'subject' => $subject,
-            'html' => $html,
-            'text' => $text,
+            'htmlContent' => $html,
+            'textContent' => $text,
         ];
 
         try {
-            $transport = $this->transport ?? new ResendTransport();
+            $transport = $this->transport ?? new BrevoTransport();
             $response = $transport->post($url, [
-                'Authorization' => 'Bearer ' . $this->apiKey,
-                'Content-Type' => 'application/json',
+                'api-key' => $this->apiKey,
+                'accept' => 'application/json',
+                'content-type' => 'application/json',
             ], json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}');
         } catch (\Throwable) {
             return $this->failed('Email provider is unavailable.');
@@ -80,8 +83,8 @@ final class EmailService
         }
         $decoded = json_decode($body, true);
         $reference = null;
-        if (is_array($decoded) && isset($decoded['id']) && is_scalar($decoded['id'])) {
-            $reference = (string) $decoded['id'];
+        if (is_array($decoded) && isset($decoded['messageId']) && is_scalar($decoded['messageId'])) {
+            $reference = (string) $decoded['messageId'];
         }
         return [
             'ok' => true,
@@ -166,7 +169,7 @@ interface EmailTransport
     public function post(string $url, array $headers, string $jsonBody): array;
 }
 
-final class ResendTransport implements EmailTransport
+final class BrevoTransport implements EmailTransport
 {
     public function post(string $url, array $headers, string $jsonBody): array
     {

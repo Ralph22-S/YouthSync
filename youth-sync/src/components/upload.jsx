@@ -1,5 +1,7 @@
 import { useRef, useState } from 'react';
 import { MAX_UPLOAD_BYTES } from '../data/mock.js';
+import { mediaSrc } from '../lib/api.js';
+import { ProfilePhoto } from './photo.jsx';
 
 const readable = (bytes) => (bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`);
 
@@ -13,7 +15,7 @@ const matches = (type, accepts) => accepts.split(',').some((rule) => {
  * Upload a photo or document for one requirement.
  * Shows a preview, validates type and size, and allows replace or remove.
  */
-export default function Upload({ accepts = 'image/*,application/pdf', value, onChange, onRemove, disabled, label = 'Upload photo' }) {
+export default function Upload({ accepts = 'image/*,application/pdf', value, onChange, onRemove, disabled, label = 'Upload photo', profile = false }) {
   const input = useRef(null);
   const [error, setError] = useState('');
 
@@ -46,9 +48,11 @@ export default function Upload({ accepts = 'image/*,application/pdf', value, onC
       <input ref={input} type="file" accept={accepts} className="hidden" onChange={handle} disabled={disabled} />
 
       {value ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-shell p-3">
-          {value.dataUrl && value.type?.startsWith('image/') ? (
-            <img src={value.dataUrl} alt={value.name} className="h-16 w-16 rounded-lg border border-line object-cover" />
+        <div className={profile ? 'space-y-3 rounded-lg border border-line bg-shell p-3' : 'flex flex-wrap items-center gap-3 rounded-lg border border-line bg-shell p-3'}>
+          {mediaSrc(value) && value.type?.startsWith('image/') ? (
+            profile
+              ? <ProfilePhoto src={mediaSrc(value)} alt={value.name || 'Profile photo'} />
+              : <img src={mediaSrc(value)} alt={value.name || 'Uploaded file'} className="h-16 w-16 rounded-lg border border-line object-cover" />
           ) : (
             <span className="grid h-16 w-16 place-items-center rounded-lg border border-line bg-white text-xs font-semibold text-[#5A6C82]">
               {value.type === 'application/pdf' ? 'PDF' : 'FILE'}
@@ -74,7 +78,7 @@ export default function Upload({ accepts = 'image/*,application/pdf', value, onC
       {error && <p className="mt-2 text-xs font-medium text-[#96201A]">{error}</p>}
       {!value && !error && (
         <p className="mt-1 text-xs text-[#8391A4]">
-          Accepted: {accepts.replace('image/*', 'JPG, PNG, HEIC').replace('application/pdf', 'PDF')} · up to {readable(MAX_UPLOAD_BYTES)}
+          Accepted: {accepts.replace('image/*', 'JPG, PNG, WebP').replace('application/pdf', 'PDF')} · up to {readable(MAX_UPLOAD_BYTES)}
         </p>
       )}
     </div>

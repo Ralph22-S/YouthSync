@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useStore } from '../../store.jsx';
 import { PageHeader } from '../../components/layouts.jsx';
-import { Badge, Confirm, Empty, Field, FormErrors, Section, Stat, Table } from '../../components/ui.jsx';
+import { Badge, Confirm, Empty, Field, FormErrors, NeedsStoreData, Pagination, Section, Stat, Table } from '../../components/ui.jsx';
 import { validateProgram, hasErrors } from '../../lib/validation.js';
-import { age, fullName, PROGRAM_CATEGORIES, APPLICATION_STATUSES, makeProgramCode } from '../../data/mock.js';
+import { api } from '../../lib/api.js';
+import { mapProgram } from '../../lib/mappers.js';
+import { pageSizesFor, useDebouncedValue, usePagedList } from '../../lib/usePagedList.js';
+import { age, fullName, PROGRAM_CATEGORIES, APPLICATION_STATUSES } from '../../data/mock.js';
 import RequirementsEditor from '../../components/requirements.jsx';
 import EligibilityFields from '../../components/eligibility.jsx';
 import { FilterBar, SORT_NEWEST } from '../../components/filters.jsx';
@@ -14,33 +17,35 @@ import { QrImage } from '../../components/qr.jsx';
 const timeRange = (p) => (p.startsAt ? `${p.startsAt}${p.endsAt ? ` – ${p.endsAt}` : ''}` : 'Whole day');
 
 export function ProgramList() {
-  const { scoped, db, deleteProgram } = useStore();
-  const [query, setQuery] = useState('');
+  const { org, db, deleteProgram, setProgramStatus, dataVersion } = useStore();
+  const [search, setSearch] = useState('');
+  const query = useDebouncedValue(search.trim(), 300);
   const [kind, setKind] = useState('');
   const [status, setStatus] = useState('');
   const [sort, setSort] = useState('newest');
 
-  const rows = scoped('programs')
-    .filter((p) => (kind ? p.kind === kind : true))
-    .filter((p) => (status ? p.status === status : true))
-    .filter((p) => p.name.toLowerCase().includes(query.toLowerCase()))
-    .sort((a, b) => {
-      if (sort === 'name') return a.name.localeCompare(b.name);
-      if (sort === 'oldest') return (a.createdAt || '').localeCompare(b.createdAt || '') || a.id - b.id;
-      return (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id;
-    });
+  // GET /sk/programs does the search (name, location, category), filters, sort and paging.
+  const list = usePagedList('/sk/programs', {
+    q: query || undefined,
+    kind: kind || undefined,
+    status: status || undefined,
+    sort,
+  }, { perPage: 25, enabled: dataVersion > 0, refreshKey: dataVersion, errorMessage: 'Unable to load programs and events.' });
+  const rows = list.rows.map((row) => mapProgram(row, org?.id));
+  const filtered = Boolean(query || kind || status);
+  const reset = () => { setSearch(''); setKind(''); setStatus(''); setSort('newest'); };
 
   return (
     <>
-      <PageHeader title="Programs & events" subtitle={`${rows.length} record(s)`}
+      <PageHeader title="Programs & events" subtitle={`${list.data ? list.total.toLocaleString() : '…'} record(s)`}
         actions={<>
           <Link to="/sk/programs/new?kind=event" className="btn btn-primary">Add event</Link>
           <Link to="/sk/programs/new?kind=program" className="btn btn-ghost">Add program</Link>
         </>} />
 
-      <FilterBar search={query} onSearch={setQuery} placeholder="Activity name"
+      <FilterBar search={search} onSearch={setSearch} placeholder="Activity name, location, or category"
         sort={{ value: sort, onChange: setSort, options: SORT_NEWEST }}
-        onReset={() => { setQuery(''); setKind(''); setStatus(''); setSort('newest'); }}>
+        onReset={reset}>
         <Field label="Type">
           <select className="field" value={kind} onChange={(e) => setKind(e.target.value)}>
             <option value="">All types</option>
@@ -56,49 +61,93 @@ export function ProgramList() {
         </Field>
       </FilterBar>
 
-      {rows.length === 0 ? (
-        <Empty title="No programs or events yet" body="Create an activity, publish it, then register participants and record attendance on the day.">
-          <Link to="/sk/programs/new" className="btn btn-primary">Add activity</Link>
+      {list.error ? (
+        <Empty title="Programs and events could not be loaded" body={list.error}>
+          <button type="button" className="btn btn-primary" onClick={list.reload}>Retry</button>
         </Empty>
+      ) : !list.data ? (
+        <Empty title="Loading programs and events" body="Fetching the latest activities from your organization." />
+      ) : rows.length === 0 ? (
+        filtered ? (
+          <Empty title="No results found" body="No programs or events match this search or these filters.">
+            <button type="button" className="btn btn-ghost" onClick={reset}>Reset filters</button>
+          </Empty>
+        ) : (
+          <Empty title="No programs or events yet" body="Create an activity, publish it, then register participants and record attendance on the day.">
+            <Link to="/sk/programs/new" className="btn btn-primary">Add activity</Link>
+          </Empty>
+        )
       ) : (
-        <Table head={['Activity', 'Date', 'Location', 'Registered', 'Status', '']}>
-          {rows.map((program) => (
-            <tr key={program.id} className="hover:bg-shell">
-              <td className="td">
-                <span className="font-medium text-navy-900">{program.name}</span>
-                <span className="block text-xs text-[#8391A4]">{program.kind[0].toUpperCase() + program.kind.slice(1)} · {program.category || 'Uncategorised'}</span>
-              </td>
-              <td className="td">{new Date(program.scheduledOn).toDateString()}<span className="block text-xs text-[#8391A4]">{timeRange(program)}</span></td>
-              <td className="td">{program.location || '—'}</td>
-              <td className="td">{db.registrations.filter((r) => r.programId === program.id && r.status === 'registered').length} / {program.maxParticipants || '∞'}</td>
-              <td className="td"><Badge value={program.status} /></td>
-              <td className="td">
-                <div className="flex flex-wrap gap-1.5">
-                  <Link to={`/sk/programs/${program.id}`} className="btn btn-ghost btn-sm">Open</Link>
-                  <Confirm className="btn btn-danger btn-sm" message={`Delete "${program.name}" and its registrations?`}
-                    onConfirm={() => deleteProgram(program.id)}>Delete</Confirm>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </Table>
+        <>
+          {list.loading && <p className="mb-2 text-sm text-[#5A6C82]">Loading programs and events…</p>}
+          <Table head={['Activity', 'Date', 'Location', 'Registered', 'Status', '']}>
+            {rows.map((program) => (
+              <tr key={program.id} className="hover:bg-shell">
+                <td className="td">
+                  <span className="font-medium text-navy-900">{program.name}</span>
+                  <span className="block text-xs text-[#8391A4]">{program.kind[0].toUpperCase() + program.kind.slice(1)} · {program.category || 'Uncategorised'}</span>
+                </td>
+                <td className="td">{new Date(program.scheduledOn).toDateString()}<span className="block text-xs text-[#8391A4]">{timeRange(program)}</span></td>
+                <td className="td">{program.location || '—'}</td>
+                <td className="td">{program.registeredCount ?? 0} / {program.maxParticipants || '∞'}</td>
+                <td className="td"><Badge value={program.status} /></td>
+                <td className="td">
+                  <div className="flex flex-wrap gap-1.5">
+                    <Link to={`/sk/programs/${program.id}`} className="btn btn-ghost btn-sm">Open</Link>
+                    {program.status === 'draft' && !(program.registeredCount > 0) ? (
+                      <Confirm className="btn btn-danger btn-sm" message={`Delete "${program.name}"?`}
+                        onConfirm={() => deleteProgram(program.id)}>Delete</Confirm>
+                    ) : program.status !== 'archived' ? (
+                      <Confirm className="btn btn-ghost btn-sm" message={`Archive "${program.name}"? It will be kept, not deleted.`}
+                        onConfirm={() => setProgramStatus(program.id, 'archived')}>Archive</Confirm>
+                    ) : null}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </Table>
+          <Pagination page={list.page} pageSize={list.perPage} total={list.total} totalPages={list.totalPages}
+            onPage={list.setPage} loading={list.loading} noun="activities"
+            pageSizes={pageSizesFor(25)} onPageSize={list.setPerPage} />
+        </>
       )}
     </>
   );
 }
 
+// Participants, the youth picker and applications for this activity.
+const PROGRAM_DETAIL_DATA = ['programs', 'registrations', 'youth', 'applications'];
+
 export function ProgramDetail() {
+  return <NeedsStoreData keys={PROGRAM_DETAIL_DATA}><ProgramDetailView /></NeedsStoreData>;
+}
+
+function ProgramDetailView() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { db, scoped, register, markAttendance, setProgramStatus, targetOf } = useStore();
+  const { db, scoped, register, markAttendance, setProgramStatus, startAttendanceSession, mutating } = useStore();
   const [query, setQuery] = useState('');
   const [youthId, setYouthId] = useState('');
+  const [attendanceCode, setAttendanceCode] = useState('');
+  const [sessionBusy, setSessionBusy] = useState(false);
 
   const program = db.programs.find((p) => p.id === Number(id));
+
+  useEffect(() => {
+    if (!program?.id) return undefined;
+    let cancelled = false;
+    api.get(`/sk/programs/${program.id}/attendance/session`)
+      .then((session) => { if (!cancelled) setAttendanceCode(session?.publicCode || ''); })
+      .catch(() => { if (!cancelled) setAttendanceCode(''); });
+    return () => { cancelled = true; };
+  }, [program?.id]);
+
   if (!program) return <Empty title="Activity not found" body="That program or event does not exist in this organization." />;
 
   const registrations = db.registrations.filter((r) => r.programId === program.id);
-  const registered = registrations.filter((r) => r.status === 'registered').length;
+  const registered = program.registeredCount != null
+    ? Number(program.registeredCount)
+    : registrations.filter((r) => r.status === 'registered').length;
   const attended = registrations.filter((r) => r.attendance === 'present').length;
   const taken = new Set(registrations.map((r) => r.youthId));
   const available = scoped('youth').filter((y) => !y.archived && !taken.has(y.id));
@@ -115,14 +164,26 @@ export function ProgramDetail() {
         subtitle={`${new Date(program.scheduledOn).toDateString()} · ${timeRange(program)} · ${program.location || 'No location set'}`}
         actions={<>
           {program.status === 'published' ? (
-            <Confirm message="Move this activity back to draft?" onConfirm={() => setProgramStatus(program.id, 'draft')}>Unpublish</Confirm>
+            <Confirm disabled={mutating} message="Move this activity back to draft?" onConfirm={() => setProgramStatus(program.id, 'draft')}>
+              {mutating ? 'Saving...' : 'Unpublish'}
+            </Confirm>
           ) : (
-            <Confirm className="btn btn-accent" message="Publish this activity?" onConfirm={() => setProgramStatus(program.id, 'published')}>Publish</Confirm>
+            <Confirm disabled={mutating} className="btn btn-accent" message="Publish this activity?" onConfirm={() => setProgramStatus(program.id, 'published')}>
+              {mutating ? 'Saving...' : 'Publish'}
+            </Confirm>
           )}
           <Link to="/sk/attendance" className="btn btn-ghost">Scan QR</Link>
           <Link to={`/sk/programs/${program.id}/edit`} className="btn btn-ghost">Edit</Link>
-          <Confirm className="btn btn-danger" message="Archive this activity?"
-            onConfirm={() => { setProgramStatus(program.id, 'archived'); navigate('/sk/programs'); }}>Archive</Confirm>
+          {!['completed', 'archived'].includes(program.status) && (
+            <Confirm disabled={mutating} className="btn btn-accent" message="Mark this activity as done? Youth will no longer see it as open."
+              onConfirm={() => setProgramStatus(program.id, 'completed')}>
+              {mutating ? 'Saving...' : 'Mark as done'}
+            </Confirm>
+          )}
+          <Confirm disabled={mutating} className="btn btn-danger" message="Archive this activity?"
+            onConfirm={() => { setProgramStatus(program.id, 'archived'); navigate('/sk/programs'); }}>
+            {mutating ? 'Saving...' : 'Archive'}
+          </Confirm>
         </>} />
 
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -170,11 +231,51 @@ export function ProgramDetail() {
           <SelectYouthPanel targetType="program" targetId={program.id} label={program.name}
             alreadySelected={registrations.filter((r) => r.selected).map((r) => r.youthId)} />
 
-          <div className="card p-5 text-center">
-            <h2 className="text-sm font-bold text-navy-900">Registration QR</h2>
-            <p className="mt-1 text-xs text-[#7A889B]">Print this on the poster. Youth scan it to register themselves.</p>
-            <div className="mt-3 flex justify-center"><QrImage value={makeProgramCode(program.id)} size={170} /></div>
-            <p className="mt-2 font-mono text-xs text-[#5A6C82]">{makeProgramCode(program.id)}</p>
+          <div className="card border-2 border-[#D7E3F4] p-5 text-center">
+            <p className="text-xs font-bold uppercase tracking-wide text-[#3D6CB3]">Registration</p>
+            <h2 className="mt-1 text-sm font-bold text-navy-900">Registration QR Code</h2>
+            <p className="mt-1 text-xs text-[#7A889B]">Print this on the poster. Youth can scan this QR code to register themselves.</p>
+            {program.registrationCode ? (
+              <>
+                <p className="mt-3 text-xs text-[#5A6C82]">Registration Code:</p>
+                <p className="font-mono text-base font-semibold text-navy-900">{program.registrationCode}</p>
+                <div className="mt-3 flex justify-center"><QrImage value={program.registrationCode} size={170} alt="Registration QR code" /></div>
+                <p className="mt-2 text-xs text-[#7A889B]">Print this on the poster. Youth scan it to register themselves.</p>
+              </>
+            ) : (
+              <p className="mt-3 text-xs text-[#7A889B]">Registration code is not available yet.</p>
+            )}
+          </div>
+
+          <div className="card border-2 border-[#D7E8DC] p-5 text-center">
+            <p className="text-xs font-bold uppercase tracking-wide text-[#1F7A4D]">Attendance</p>
+            <h2 className="mt-1 text-sm font-bold text-navy-900">Attendance QR Code</h2>
+            <p className="mt-1 text-xs text-[#7A889B]">Use this code for attendance.</p>
+            {attendanceCode ? (
+              <>
+                <p className="mt-3 text-xs text-[#5A6C82]">Attendance Code:</p>
+                <p className="font-mono text-base font-semibold text-navy-900">{attendanceCode}</p>
+                <div className="mt-3 flex justify-center"><QrImage value={attendanceCode} size={170} alt="Attendance QR code" /></div>
+                <p className="mt-2 text-xs text-[#7A889B]">Youth scan this QR or type the code to check in. This is not the registration code.</p>
+              </>
+            ) : (
+              <>
+                <p className="mt-3 text-xs text-[#7A889B]">Start an attendance session to activate the attendance code.</p>
+                <button type="button" className="btn btn-primary mt-3" disabled={sessionBusy || mutating || !startAttendanceSession}
+                  onClick={async () => {
+                    if (!startAttendanceSession) return;
+                    setSessionBusy(true);
+                    try {
+                      const session = await startAttendanceSession(program.id);
+                      setAttendanceCode(session?.publicCode || '');
+                    } finally {
+                      setSessionBusy(false);
+                    }
+                  }}>
+                  {sessionBusy ? 'Starting...' : 'Start attendance session'}
+                </button>
+              </>
+            )}
           </div>
 
           <form className="card space-y-4 p-5" onSubmit={(e) => { e.preventDefault(); if (!youthId) return; register(program.id, Number(youthId)); setYouthId(''); }}>
@@ -240,8 +341,13 @@ const EMPTY = {
 
 export function ProgramForm() {
   const { id } = useParams();
+  return <NeedsStoreData keys={id ? ['programs'] : []}><ProgramFormView /></NeedsStoreData>;
+}
+
+function ProgramFormView() {
+  const { id } = useParams();
   const navigate = useNavigate();
-  const { db, saveProgram } = useStore();
+  const { db, saveProgram, mutating } = useStore();
   const existing = id ? db.programs.find((p) => p.id === Number(id)) : null;
   const [searchParams] = useSearchParams();
   const kindFromQuery = searchParams.get('kind');
@@ -260,8 +366,17 @@ export function ProgramForm() {
         e.preventDefault();
         const found = validateProgram(values);
         if (hasErrors(found)) { setErrors(found); return; }
-        const savedId = await saveProgram(values);
-        if (savedId) navigate(`/sk/programs/${savedId}`);
+        if (mutating) return;
+        try {
+          const savedId = await saveProgram(values);
+          if (savedId) navigate(`/sk/programs/${savedId}`);
+        } catch (err) {
+          const fields = err?.fields && typeof err.fields === 'object' ? err.fields : {};
+          setErrors({
+            ...fields,
+            form: err?.message || 'Could not save this activity.',
+          });
+        }
       }}>
         <FormErrors errors={errors} />
         <div className="grid gap-4 sm:grid-cols-3">
@@ -303,7 +418,9 @@ export function ProgramForm() {
         <EligibilityFields values={values} onChange={setValues} />
 
         <div className="flex gap-3 pt-1">
-          <button type="submit" className="btn btn-primary">{existing ? 'Save changes' : 'Create activity'}</button>
+          <button type="submit" className="btn btn-primary" disabled={mutating}>
+            {mutating ? (existing ? 'Saving...' : 'Creating...') : (existing ? 'Save changes' : 'Create activity')}
+          </button>
           <button type="button" className="btn btn-ghost" onClick={() => navigate('/sk/programs')}>Cancel</button>
         </div>
       </form>

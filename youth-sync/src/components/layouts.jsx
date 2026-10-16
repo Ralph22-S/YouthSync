@@ -6,6 +6,8 @@ import {
   UserCircle, LogOut, Menu, X, ChevronRight,
 } from 'lucide-react';
 import { useStore } from '../store.jsx';
+import { api } from '../lib/api.js';
+import { useNotificationPoll } from '../lib/notificationPoll.js';
 import { Flash } from './ui.jsx';
 
 const initials = (name = '') => name.split(/\s+/).filter(Boolean)
@@ -16,11 +18,17 @@ const initials = (name = '') => name.split(/\s+/).filter(Boolean)
 export const skInbox = (notification, orgId) => notification.orgId === orgId && !notification.youthId;
 
 /** Youth inbox: their own notices only. */
-export const youthInbox = (notification, orgId, youthId) => notification.youthId === youthId;
+export const youthInbox = (notification, orgId, youthId) => {
+  const noticeYouthId = Number(notification.youthId);
+  const accountYouthId = Number(youthId);
+  return accountYouthId > 0 && noticeYouthId === accountYouthId;
+};
 
 export const subLabel = (org) => {
   if (!org) return 'free';
-  if (['active', 'trial'].includes(org.subStatus) && org.expiresIn !== null && org.expiresIn <= 3 && org.expiresIn >= 0) {
+  // daysRemaining (server, trial/active only) when present; expiresIn for older payloads.
+  const days = org.daysRemaining ?? org.expiresIn ?? null;
+  if (['active', 'trial'].includes(org.subStatus) && days !== null && days <= 3 && days >= 0) {
     return 'expiring soon';
   }
   return org.subStatus;
@@ -61,7 +69,7 @@ function NavSection({ label, items, onNavigate }) {
 function Shell({ sections, contextName, contextMeta }) {
   const [open, setOpen] = useState(false);
   const { user, logout, sessionReady } = useStore();
-  if (sessionReady === false) {
+  if (sessionReady !== true) {
     return <div className="grid min-h-full place-items-center text-sm text-ink-muted">Restoring session…</div>;
   }
   const navigate = useNavigate();
@@ -142,7 +150,7 @@ function Banner() {
   if (subLabel(org) === 'expiring soon') {
     return (
       <div className="border-b border-warning-border bg-warning-bg px-4 py-2 text-xs text-warning sm:px-6 lg:px-8">
-        Your {org.subStatus === 'trial' ? 'trial' : 'subscription'} expires in {org.expiresIn} day(s).{' '}
+        Your {org.subStatus === 'trial' ? 'trial' : 'subscription'} {(org.daysRemaining ?? org.expiresIn) === 0 ? 'ends today' : `expires in ${org.daysRemaining ?? org.expiresIn} day(s)`}.{' '}
         <Link to="/sk/subscription/plans" className="font-semibold underline">View plans</Link>
       </div>
     );
@@ -150,8 +158,16 @@ function Banner() {
   if (org.subStatus === 'expired') {
     return (
       <div className="border-b border-danger-border bg-danger-bg px-4 py-2 text-xs text-danger sm:px-6 lg:px-8">
-        Your subscription has expired. Records are retained and advanced features are unavailable until renewal.{' '}
-        <Link to="/sk/subscription/plans" className="font-semibold underline">Renew subscription</Link>
+        Your subscription has expired. Free plan limits apply; all records are kept. Ask your System Administrator to renew it.{' '}
+        <Link to="/sk/subscription" className="font-semibold underline">View subscription</Link>
+      </div>
+    );
+  }
+  if (org.subStatus === 'cancelled') {
+    return (
+      <div className="border-b border-danger-border bg-danger-bg px-4 py-2 text-xs text-danger sm:px-6 lg:px-8">
+        Your subscription was cancelled. Free plan limits apply; all records are kept.{' '}
+        <Link to="/sk/subscription" className="font-semibold underline">View subscription</Link>
       </div>
     );
   }
@@ -161,17 +177,23 @@ function Banner() {
 /* ------------------------------------------------------- role-based shells */
 
 export function SkLayout() {
-  const { user, org, db, sessionReady, skLoading, skError, retrySk } = useStore();
-  if (sessionReady === false) {
+  const { user, org, db, sessionReady, skLoading, skError, retrySk, notificationUnread, applicationsPending, reloadNotifications } = useStore();
+  useNotificationPoll(Boolean(user) && typeof reloadNotifications === 'function', () => reloadNotifications({ silent: true }));
+  if (sessionReady !== true) {
     return <div className="grid min-h-full place-items-center text-sm text-ink-muted">Restoring session…</div>;
   }
   if (!user) return <Navigate to="/login" replace />;
   if (user.role !== 'sk_official') return <Navigate to={user.role === 'system_admin' ? '/admin' : '/youth'} replace />;
   if (user.mustChangePassword) return <Navigate to="/change-password" replace />;
 
-  const unread = db.notifications.filter((n) => skInbox(n, org.id) && !n.read).length;
-  const pending = db.applications.filter((a) => a.orgId === org.id
-    && ['pending', 'needs_resubmission'].includes(a.status)).length;
+  const unread = typeof notificationUnread === 'number'
+    ? notificationUnread
+    : db.notifications.filter((n) => skInbox(n, org.id) && !n.read).length;
+  // Server totals (GET /sk/applications counts); the store copy is only a fallback.
+  const pending = typeof applicationsPending === 'number'
+    ? applicationsPending
+    : db.applications.filter((a) => a.orgId === org.id
+      && ['pending', 'needs_resubmission'].includes(a.status)).length;
 
   const sections = [
     { label: 'Overview', items: [{ to: '/sk', label: 'Dashboard', icon: LayoutDashboard, end: true }] },
@@ -215,8 +237,9 @@ export function SkLayout() {
 }
 
 export function YouthLayout() {
-  const { user, org, db, sessionReady } = useStore();
-  if (sessionReady === false) {
+  const { user, org, db, sessionReady, pollYouthNotifications } = useStore();
+  useNotificationPoll(Boolean(user) && typeof pollYouthNotifications === 'function', () => pollYouthNotifications());
+  if (sessionReady !== true) {
     return <div className="grid min-h-full place-items-center text-sm text-ink-muted">Restoring session…</div>;
   }
   if (!user) return <Navigate to="/login" replace />;
@@ -235,6 +258,7 @@ export function YouthLayout() {
     ] },
     { label: 'Programs', items: [
       { to: '/youth/events', label: 'Available Programs', icon: CalendarDays },
+      { to: '/youth/scan', label: 'Register', icon: QrCode },
       { to: '/youth/registrations', label: 'My Registrations', icon: ClipboardList },
       { to: '/youth/attendance', label: 'My Attendance', icon: QrCode },
     ] },
@@ -248,15 +272,48 @@ export function YouthLayout() {
   return <Shell sections={sections} contextName="Youth" contextMeta={org ? `${org.barangay}, ${org.municipality}` : ''} />;
 }
 
+const ADMIN_ACTIVITY_SEEN = 'youthsync.adminActivitySeen';
+
 export function AdminLayout() {
-  const { user, orgs, sessionReady } = useStore();
-  if (sessionReady === false) {
+  const { user, orgs, orgCounts, sessionReady } = useStore();
+  const location = useLocation();
+  const [activityUnread, setActivityUnread] = useState(0);
+  const onAudit = location.pathname.startsWith('/admin/monitoring');
+  useNotificationPoll(Boolean(user), async () => {
+    try {
+      const result = await api.get('/admin/activity', { query: { page: 1, perPage: 25 } });
+      const items = Array.isArray(result?.items) ? result.items : [];
+      const maxId = items.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0);
+      const stored = Number(sessionStorage.getItem(ADMIN_ACTIVITY_SEEN) || 0);
+      if (!stored) {
+        if (maxId > 0) sessionStorage.setItem(ADMIN_ACTIVITY_SEEN, String(maxId));
+        setActivityUnread(0);
+        return;
+      }
+      if (onAudit) {
+        if (maxId > stored) sessionStorage.setItem(ADMIN_ACTIVITY_SEEN, String(maxId));
+        setActivityUnread(0);
+        return;
+      }
+      const fresh = items.filter((row) => Number(row.id) > stored);
+      const seen = new Set();
+      setActivityUnread(fresh.filter((row) => {
+        if (seen.has(row.id)) return false;
+        seen.add(row.id);
+        return true;
+      }).length);
+    } catch {
+      // Leave the current badge. The audit log itself reports a load error.
+    }
+  });
+  if (sessionReady !== true) {
     return <div className="grid min-h-full place-items-center text-sm text-ink-muted">Restoring session…</div>;
   }
   if (!user) return <Navigate to="/login" replace />;
   if (user.role !== 'system_admin') return <Navigate to={user.role === 'youth' ? '/youth' : '/sk'} replace />;
 
-  const pending = orgs.filter((o) => o.status === 'pending').length;
+  // Live console: the status counts from a one-row request. Demo store: its list.
+  const pending = orgCounts ? orgCounts.pending || 0 : (orgs || []).filter((o) => o.status === 'pending').length;
 
   const sections = [
     { label: 'Overview', items: [{ to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true }] },
@@ -269,7 +326,7 @@ export function AdminLayout() {
     ] },
     { label: 'System', items: [
       { to: '/admin/users', label: 'User Accounts', icon: UserCog },
-      { to: '/admin/monitoring', label: 'Audit Logs', icon: ScrollText },
+      { to: '/admin/monitoring', label: 'Audit Logs', icon: ScrollText, badge: activityUnread },
     ] },
   ];
 

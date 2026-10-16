@@ -10,14 +10,31 @@ require dirname(__DIR__) . '/config/config.php';
 require dirname(__DIR__) . '/config/database.php';
 
 $pdo = youthsync_pdo();
-$leftoverY = $pdo->query("SELECT id FROM youth WHERE first_name = 'PhaseNine'")->fetchAll();
+// Youth id 5 ("PhaseNine TestA", org 1, created 2026-09-25) is left over from an interrupted
+// run before this guard existed. It is kept as data and never deleted; the guard ignores that
+// one exact id. Any other PhaseNine record still stops the run. New records use "TestB".
+$knownLeftoverYouthIds = [5];
+$leftoverY = $pdo->query(
+    "SELECT id FROM youth WHERE first_name = 'PhaseNine' AND id NOT IN (" . implode(',', $knownLeftoverYouthIds) . ')'
+)->fetchAll();
 $leftoverP = $pdo->query("SELECT id FROM programs WHERE name LIKE 'PhaseNine Test%'")->fetchAll();
 if ($leftoverY || $leftoverP) {
     fwrite(STDERR, "STOP: pre-existing PhaseNine test records found. No cleanup was performed.\n");
     exit(2);
 }
 
-$base = 'http://localhost/YouthSync_UI_Refresh/api';
+$base = rtrim((string) (getenv('YOUTHSYNC_API_BASE') ?: 'http://localhost/YouthSync/api'), '/');
+
+// Expected subscription state is read from the database, so the checks stay valid after
+// the demo trial (org 1) and Basic term (org 2) end: once expires_at has passed, the
+// status is "expired" and the Free limits apply while the stored plan is unchanged.
+$termRunning = static function (int $orgId) use ($pdo): bool {
+    $stmt = $pdo->prepare('SELECT expires_at IS NULL OR expires_at >= CURDATE() FROM organizations WHERE id = :id');
+    $stmt->execute(['id' => $orgId]);
+    return (int) $stmt->fetchColumn() === 1;
+};
+$org1Running = $termRunning(1);
+$org2Running = $termRunning(2);
 $counts = static function () use ($pdo): array {
     return [
         'users' => (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn(),
@@ -115,15 +132,15 @@ $expect['subscription_sk1'] = [200];
 $subData = payload($sub)['data'] ?? [];
 $logic['sk1_plan'] = ($subData['plan'] ?? '') === 'premium'
     && ($subData['planName'] ?? '') === 'Premium'
-    && ($subData['status'] ?? '') === 'trial';
+    && ($subData['status'] ?? '') === ($org1Running ? 'trial' : 'expired');
 $sk1Limits = is_array($subData['limits'] ?? null) ? $subData['limits'] : [];
 $logic['sk1_limits'] = array_key_exists('youth', $sk1Limits)
     && array_key_exists('accounts', $sk1Limits)
     && array_key_exists('programs', $sk1Limits)
     && array_key_exists('assistance', $sk1Limits)
     && array_key_exists('qr', $sk1Limits)
-    && $sk1Limits['youth'] === null
-    && $sk1Limits['programs'] === null;
+    && $sk1Limits['youth'] === ($org1Running ? null : 20)
+    && $sk1Limits['programs'] === ($org1Running ? null : 1);
 $logic['sk1_usage_present'] = isset($subData['usage']['youth'], $subData['usage']['accounts'], $subData['usage']['programs'], $subData['usage']['assistance'], $subData['usage']['qr'])
     && is_int($subData['usage']['youth'])
     && is_int($subData['usage']['accounts'])
@@ -131,8 +148,8 @@ $logic['sk1_usage_present'] = isset($subData['usage']['youth'], $subData['usage'
 $sk1Remaining = is_array($subData['remaining'] ?? null) ? $subData['remaining'] : [];
 $logic['sk1_remaining_unlimited'] = array_key_exists('youth', $sk1Remaining)
     && array_key_exists('qr', $sk1Remaining)
-    && $sk1Remaining['youth'] === null
-    && $sk1Remaining['qr'] === null;
+    && ($org1Running ? $sk1Remaining['youth'] === null && $sk1Remaining['qr'] === null
+        : is_int($sk1Remaining['youth']) && is_int($sk1Remaining['qr']));
 $logic['no_sensitive'] = !str_contains($sub['body'], 'password_hash')
     && !str_contains($sub['body'], 'YouthSync1!')
     && !str_contains($sub['body'], 'C:\\xampp');
@@ -145,7 +162,7 @@ $youthBefore = (int) ($usageBeforeData['usage']['youth'] ?? 0);
 
 $createdYouth = req('create_youth', 'POST', "$base/sk/youth", json_encode([
     'firstName' => 'PhaseNine',
-    'lastName' => 'TestA',
+    'lastName' => 'TestB',
     'birthDate' => '2006-03-03',
     'address' => 'Phase 9 test address',
     'contact' => '09190009901',
@@ -182,14 +199,17 @@ $tests[] = $sk2Sub;
 $expect['subscription_sk2'] = [200];
 $sk2Data = payload($sk2Sub)['data'] ?? [];
 $sk2Limits = is_array($sk2Data['limits'] ?? null) ? $sk2Data['limits'] : [];
+$sk2Expected = $org2Running
+    ? ['status' => 'active', 'youth' => 250, 'accounts' => 3, 'programs' => null, 'assistance' => 20, 'qr' => 3]
+    : ['status' => 'expired', 'youth' => 20, 'accounts' => 1, 'programs' => 1, 'assistance' => 1, 'qr' => 1];
 $logic['sk2_isolated'] = ($sk2Data['plan'] ?? '') === 'basic'
-    && ($sk2Data['status'] ?? '') === 'active'
-    && ($sk2Limits['youth'] ?? 0) === 250
-    && ($sk2Limits['accounts'] ?? 0) === 3
+    && ($sk2Data['status'] ?? '') === $sk2Expected['status']
+    && ($sk2Limits['youth'] ?? 0) === $sk2Expected['youth']
+    && ($sk2Limits['accounts'] ?? 0) === $sk2Expected['accounts']
     && array_key_exists('programs', $sk2Limits)
-    && $sk2Limits['programs'] === null
-    && ($sk2Limits['assistance'] ?? 0) === 20
-    && ($sk2Limits['qr'] ?? 0) === 3
+    && $sk2Limits['programs'] === $sk2Expected['programs']
+    && ($sk2Limits['assistance'] ?? 0) === $sk2Expected['assistance']
+    && ($sk2Limits['qr'] ?? 0) === $sk2Expected['qr']
     && ($sk2Data['plan'] ?? '') !== ($subData['plan'] ?? 'premium-mismatch');
 $sk2Usage = req('usage_sk2', 'GET', "$base/sk/subscription/usage?organization_id=1", null, $sk2);
 $tests[] = $sk2Usage;
@@ -223,7 +243,10 @@ if ($remainingPrograms === 0) {
     $blocked = req('plan_limit_program', 'POST', "$base/sk/programs", $programBody, $sk4);
     $tests[] = $blocked;
     $expect['plan_limit_program'] = [403];
-    $logic['plan_limit_code'] = (payload($blocked)['error']['code'] ?? '') === 'PLAN_LIMIT';
+    $blockedError = payload($blocked)['error'] ?? [];
+    $logic['plan_limit_code'] = ($blockedError['code'] ?? '') === 'PLAN_LIMIT_REACHED'
+        && ($blockedError['resource'] ?? '') === 'programs'
+        && ($blockedError['limit'] ?? null) === 1;
 } else {
     $first = req('create_free_program', 'POST', "$base/sk/programs", $programBody, $sk4);
     $tests[] = $first;
@@ -240,7 +263,11 @@ if ($remainingPrograms === 0) {
     ]), $sk4);
     $tests[] = $blocked;
     $expect['plan_limit_program'] = [403];
-    $logic['plan_limit_code'] = (payload($blocked)['error']['code'] ?? '') === 'PLAN_LIMIT';
+    $blockedError = payload($blocked)['error'] ?? [];
+    $logic['plan_limit_code'] = ($blockedError['code'] ?? '') === 'PLAN_LIMIT_REACHED'
+        && ($blockedError['resource'] ?? '') === 'programs'
+        && ($blockedError['usage'] ?? null) === 1
+        && ($blockedError['limit'] ?? null) === 1;
 }
 
 $failed = [];

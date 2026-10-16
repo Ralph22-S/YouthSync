@@ -48,6 +48,14 @@ export function validateYouth(values) {
   return errors;
 }
 
+export function validatePassword(password) {
+  const value = String(password ?? '');
+  if (value.length < 8 || !/[A-Z]/.test(value) || !/[a-z]/.test(value)) {
+    return 'Use at least 8 characters, with 1 capital letter and 1 lowercase letter.';
+  }
+  return '';
+}
+
 export function validateUser(values, { existingEmails = [], requirePassword = true } = {}) {
   const errors = {};
 
@@ -64,8 +72,9 @@ export function validateUser(values, { existingEmails = [], requirePassword = tr
     if (contact) errors.mobile = contact;
   }
 
-  if (requirePassword && (values.password ?? '').length < 8) {
-    errors.password = 'Password must be at least 8 characters.';
+  if (requirePassword) {
+    const password = validatePassword(values.password);
+    if (password) errors.password = password;
   }
 
   return errors;

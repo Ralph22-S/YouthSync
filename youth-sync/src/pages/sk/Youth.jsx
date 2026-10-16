@@ -1,90 +1,96 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useStore } from '../../store.jsx';
 import { PageHeader } from '../../components/layouts.jsx';
-import { Badge, Confirm, Empty, Field, FormErrors, Section, Stat, Table } from '../../components/ui.jsx';
+import { Badge, Confirm, Empty, Field, FormErrors, NeedsStoreData, Pagination, Section, Stat, Table } from '../../components/ui.jsx';
 import { age, fullName, youthCode, ACCOUNT_STATUSES, PRIORITY_DISCLAIMER, INTEREST_OPTIONS, SKILL_OPTIONS, ACTIVITY_OPTIONS } from '../../data/mock.js';
 import EducationFields from '../../components/education.jsx';
 import { FilterBar, SORT_NEWEST } from '../../components/filters.jsx';
 import { TagInput, CheckboxGroup } from '../../components/tags.jsx';
 import Upload from '../../components/upload.jsx';
-import PhotoField from '../../components/photo.jsx';
+import PhotoField, { ProfilePhoto } from '../../components/photo.jsx';
+import { api, mediaSrc } from '../../lib/api.js';
+import { mapYouth } from '../../lib/mappers.js';
+import { pageSizesFor, useDebouncedValue, usePagedList } from '../../lib/usePagedList.js';
 import { validateYouth, digitsOnly, hasErrors, CONTACT_LENGTH } from '../../lib/validation.js';
 
 export function YouthList() {
-  const { scoped, remaining, limits, plan, deleteYouth, accountStatusOf, skLoading, skError, retrySk } = useStore();
-  const [query, setQuery] = useState('');
+  const { org, remaining, limits, plan, deleteYouth, accountStatusOf, dataVersion } = useStore();
+  const [search, setSearch] = useState('');
+  const query = useDebouncedValue(search.trim(), 300);
   const [priority, setPriority] = useState('');
   const [employment, setEmployment] = useState('');
   const [archived, setArchived] = useState(false);
   const [sort, setSort] = useState('newest');
-  const [page, setPage] = useState(1);
 
-  const rows = useMemo(() => scoped('youth').filter((y) => {
-    if (y.archived !== archived) return false;
-    if (priority && y.level !== priority) return false;
-    if (employment && y.employment !== employment) return false;
-    if (!query) return true;
-    const term = query.toLowerCase();
-    return [y.firstName, y.lastName, y.school, y.address, y.contact].join(' ').toLowerCase().includes(term);
-  }).sort((a, b) => {
-    // Newest first is the default. Records added today sort above the seeded ones,
-    // and ties fall back to id so the most recent insert always wins.
-    if (sort === 'name') return a.lastName.localeCompare(b.lastName);
-    if (sort === 'oldest') return (a.createdAt || '').localeCompare(b.createdAt || '') || a.id - b.id;
-    return (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id;
-  }), [scoped, query, priority, employment, archived, sort]);
-
-  const perPage = 15;
-  const pages = Math.max(1, Math.ceil(rows.length / perPage));
-  const current = rows.slice((page - 1) * perPage, page * perPage);
+  // Search, filters, sort and paging all run on the server (GET /sk/youth).
+  // Changing any of them goes back to page 1 inside usePagedList.
+  const list = usePagedList('/sk/youth', {
+    q: query || undefined,
+    priority: priority || undefined,
+    employment: employment || undefined,
+    archived: archived ? 1 : 0,
+    sort,
+  }, { perPage: 15, enabled: dataVersion > 0, refreshKey: dataVersion, errorMessage: 'Unable to load youth records.' });
+  const rows = list.rows.map((row) => mapYouth(row, org?.id));
+  const filtered = Boolean(query || priority || employment);
+  const reset = () => { setSearch(''); setPriority(''); setEmployment(''); setSort('newest'); };
 
   return (
     <>
       <PageHeader
         title={archived ? 'Archived youth records' : 'Youth records'}
-        subtitle={`${rows.length} record(s) · ${limits.youth === null ? 'unlimited capacity' : `${remaining('youth').toLocaleString()} slot(s) left on the ${plan.name} plan`}`}
+        subtitle={`${list.data ? list.total.toLocaleString() : '…'} record(s) · ${limits.youth === null ? 'unlimited capacity' : `${remaining('youth').toLocaleString()} slot(s) left on the ${plan.name} plan`}`}
         actions={<>
-          <button type="button" className="btn btn-ghost" onClick={() => { setArchived((v) => !v); setPage(1); }}>
+          <button type="button" className="btn btn-ghost" onClick={() => setArchived((v) => !v)}>
             {archived ? 'Back to active' : 'Archived'}
           </button>
-          <Link to="/sk/youth/import" className="btn btn-ghost">Import CSV</Link>
+          <Link to="/sk/youth/import" className="btn btn-ghost">Import CSV or Excel</Link>
           <Link to="/sk/youth/new" className="btn btn-primary">Add youth</Link>
         </>}
       />
 
-      <FilterBar search={query} onSearch={(v) => { setQuery(v); setPage(1); }}
+      <FilterBar search={search} onSearch={setSearch}
         placeholder="Name, school, address, or contact"
-        sort={{ value: sort, onChange: (v) => { setSort(v); setPage(1); }, options: SORT_NEWEST }}
-        onReset={() => { setQuery(''); setPriority(''); setEmployment(''); setSort('newest'); setPage(1); }}>
+        sort={{ value: sort, onChange: setSort, options: SORT_NEWEST }}
+        onReset={reset}>
         <Field label="Priority">
-          <select className="field" value={priority} onChange={(e) => { setPriority(e.target.value); setPage(1); }}>
+          <select className="field" value={priority} onChange={(e) => setPriority(e.target.value)}>
             <option value="">All priorities</option>
             <option>High</option><option>Medium</option>
           </select>
         </Field>
         <Field label="Employment">
-          <select className="field" value={employment} onChange={(e) => { setEmployment(e.target.value); setPage(1); }}>
+          <select className="field" value={employment} onChange={(e) => setEmployment(e.target.value)}>
             <option value="">All employment</option>
             {['Employed', 'Unemployed', 'Self-employed', 'Student'].map((s) => <option key={s}>{s}</option>)}
           </select>
         </Field>
       </FilterBar>
 
-      {skLoading ? (
+      {list.error ? (
+        <Empty title="Youth records could not be loaded" body={list.error}>
+          <button type="button" className="btn btn-primary" onClick={list.reload}>Retry</button>
+        </Empty>
+      ) : !list.data ? (
         <Empty title="Loading youth records" body="Fetching the latest records from your organization." />
-      ) : skError ? (
-        <Empty title="Youth records could not be loaded" body={skError}>
-          <button type="button" className="btn btn-primary" onClick={() => retrySk()}>Retry</button>
-        </Empty>
       ) : rows.length === 0 ? (
-        <Empty title="No youth records here yet" body="Add your first youth record, or import an existing list from a CSV file.">
-          <Link to="/sk/youth/new" className="btn btn-primary">Add youth record</Link>
-        </Empty>
+        filtered ? (
+          <Empty title="No results found" body="No youth records match this search or these filters.">
+            <button type="button" className="btn btn-ghost" onClick={reset}>Reset filters</button>
+          </Empty>
+        ) : archived ? (
+          <Empty title="No archived youth records" body="Archived records appear here and can be restored anytime." />
+        ) : (
+          <Empty title="No youth records here yet" body="Add your first youth record, or import an existing list from a CSV file.">
+            <Link to="/sk/youth/new" className="btn btn-primary">Add youth record</Link>
+          </Empty>
+        )
       ) : (
         <>
+          {list.loading && <p className="mb-2 text-sm text-[#5A6C82]">Loading youth records…</p>}
           <Table head={['Name', 'Age', 'Education', 'Employment', 'Priority', 'Account', 'Actions']} minWidth={880}>
-            {current.map((y) => (
+            {rows.map((y) => (
               <tr key={y.id} className="hover:bg-shell">
                 <td className="td">
                   <span className="font-medium text-navy-900">{fullName(y)}</span>
@@ -107,20 +113,24 @@ export function YouthList() {
               </tr>
             ))}
           </Table>
-          {pages > 1 && (
-            <div className="mt-4 flex items-center gap-2">
-              <button type="button" className="btn btn-ghost btn-sm" disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button>
-              <span className="text-sm text-[#5A6C82]">Page {page} of {pages}</span>
-              <button type="button" className="btn btn-ghost btn-sm" disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button>
-            </div>
-          )}
+          <Pagination page={list.page} pageSize={list.perPage} total={list.total} totalPages={list.totalPages}
+            onPage={list.setPage} loading={list.loading} noun="youth records"
+            pageSizes={pageSizesFor(15)} onPageSize={list.setPerPage} />
         </>
       )}
     </>
   );
 }
 
+// Whole collections the detail page cross-links (applications, attendance,
+// assistance records); loaded when the page opens, not on every SK screen.
+const YOUTH_DETAIL_DATA = ['youth', 'programs', 'registrations', 'assistance', 'applications'];
+
 export function YouthDetail() {
+  return <NeedsStoreData keys={YOUTH_DETAIL_DATA}><YouthDetailView /></NeedsStoreData>;
+}
+
+function YouthDetailView() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { db, scoped, archiveYouth, restoreYouth, deleteYouth, targetOf } = useStore();
@@ -234,9 +244,16 @@ export function YouthDetail() {
         </div>
 
         <aside className="space-y-4">
-          {youth.photo?.dataUrl && (
+          {mediaSrc(youth.photo) && (
             <Section title="Profile photo">
-              <img src={youth.photo.dataUrl} alt={fullName(youth)} className="mt-3 h-40 w-full rounded-lg border border-line object-cover" />
+              <ProfilePhoto src={mediaSrc(youth.photo)} alt={fullName(youth)} className="mt-3" />
+            </Section>
+          )}
+          {youth.document?.url && (
+            <Section title="Supporting document">
+              <a href={mediaSrc(youth.document)} className="mt-3 inline-flex text-sm font-medium text-navy-900 underline" target="_blank" rel="noreferrer">
+                {youth.document.name || 'View document'}
+              </a>
             </Section>
           )}
           <Section title="Priority recommendation">
@@ -265,11 +282,18 @@ const EMPTY = {
 
 export function YouthForm() {
   const { id } = useParams();
+  // Editing reads the record from the store copy; adding needs nothing.
+  return <NeedsStoreData keys={id ? ['youth'] : []}><YouthFormView /></NeedsStoreData>;
+}
+
+function YouthFormView() {
+  const { id } = useParams();
   const navigate = useNavigate();
   const { db, saveYouth, saveYouthWithAccount, canAdd, limitMessage, notify, plan, usage, limits, mutating } = useStore();
   const [withAccount, setWithAccount] = useState(false);
   const [accountEmail, setAccountEmail] = useState('');
   const [issued, setIssued] = useState(null);
+  const [copied, setCopied] = useState(false);
   const existing = id ? db.youth.find((y) => y.id === Number(id)) : null;
   // Checked on render as well as on submit, so opening the route directly
   // cannot get around the plan limit.
@@ -311,24 +335,44 @@ export function YouthForm() {
     if (savedId) navigate(`/sk/youth/${savedId}`);
   };
 
-  if (issued) {
+  const closeIssued = () => {
+    const id = issued?.id;
+    setIssued(null);
+    setCopied(false);
+    if (id) navigate(`/sk/youth/${id}`);
+    else navigate('/sk/youth');
+  };
+
+  const copyIssuedPassword = async () => {
+    const password = issued?.password || '';
+    if (!password) return;
+    try {
+      await navigator.clipboard.writeText(password);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+      notify('Copy the password from the screen. The browser blocked clipboard access.', 'warning');
+    }
+  };
+
+  if (issued?.password) {
     return (
       <>
         <PageHeader title="Youth account created"
           breadcrumb={[{ label: 'Youth Records', to: '/sk/youth' }, { label: 'Account created' }]} />
         <div className="card card-pad max-w-lg">
-          <p className="t-body">Give these sign-in details to the youth. The temporary password is shown once.</p>
+          <p className="t-body">Give these sign-in details to the youth. This temporary password is shown only now.</p>
           <dl className="mt-4 space-y-2.5 border-t border-line pt-4 text-sm">
             <div className="flex justify-between gap-4"><dt className="text-ink-muted">Youth ID</dt><dd className="font-mono font-semibold">{issued.code}</dd></div>
-            <div className="flex justify-between gap-4"><dt className="text-ink-muted">Email</dt><dd className="font-semibold">{accountEmail}</dd></div>
-            <div className="flex justify-between gap-4"><dt className="text-ink-muted">Temporary password</dt><dd className="font-mono text-base font-bold">{issued.password}</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-ink-muted">Email</dt><dd className="font-semibold">{issued.email || accountEmail}</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-ink-muted">Temporary Password</dt><dd className="font-mono text-base font-bold">{issued.password}</dd></div>
           </dl>
           <p className="mt-4 rounded-lg bg-info-bg px-3 py-2 text-xs text-info">
-            The youth is required to set their own password at first sign-in.
+            The Youth must change this password after signing in.
           </p>
-          <div className="mt-5 flex gap-2">
-            <button type="button" className="btn btn-primary" onClick={() => navigate(`/sk/youth/${issued.id}`)}>View record</button>
-            <Link to="/sk/youth" className="btn btn-secondary">Back to Youth Records</Link>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button type="button" className="btn btn-secondary" onClick={copyIssuedPassword}>{copied ? 'Copied' : 'Copy Password'}</button>
+            <button type="button" className="btn btn-primary" onClick={closeIssued}>Done</button>
           </div>
         </div>
       </>
@@ -490,7 +534,9 @@ export function YouthForm() {
         </Section>
 
         <div className="flex gap-3">
-          <button type="submit" className="btn btn-primary" disabled={mutating}>{existing ? 'Save changes' : 'Add youth record'}</button>
+          <button type="submit" className="btn btn-primary" disabled={mutating}>
+            {mutating ? 'Saving…' : existing ? 'Save changes' : withAccount ? 'Create youth account' : 'Add youth record'}
+          </button>
           <button type="button" className="btn btn-ghost" onClick={() => navigate(-1)}>Cancel</button>
         </div>
       </form>
@@ -499,44 +545,54 @@ export function YouthForm() {
 }
 
 const REQUIRED = ['first_name', 'last_name', 'birth_date', 'gender', 'address'];
-const SAMPLE_CSV = `first_name,middle_name,last_name,birth_date,gender,address,contact_number,education,school,family_income,family_members
-Juan,Reyes,Dela Cruz,2005-03-14,Male,"Purok 2, Barangay Ibaba",09171234567,Senior High School,Paete National High School,9000,6
-Angelica,Cruz,Bagsic,2007-08-02,Female,"Purok 4, Barangay Ibaba",09181234567,Junior High School,Paete National High School,15000,5
-,,Torres,2006-01-01,Male,"Purok 1",,,,,`;
+const isGmail = (value) => /^[^@\s]+@gmail\.com$/i.test(String(value || '').trim());
+const SAMPLE_CSV = `first_name,middle_name,last_name,birth_date,gender,address,email,contact_number,education,school,family_income,family_members
+Juan,Reyes,Dela Cruz,2005-03-14,Male,"Purok 2, Barangay Ibaba",juan.reyes.sample@gmail.com,09171234567,Senior High School,Paete National High School,9000,6
+Angelica,Cruz,Bagsic,2007-08-02,Female,"Purok 4, Barangay Ibaba",angelica.bagsic.sample@gmail.com,09181234567,Junior High School,Paete National High School,15000,5
+,,Torres,2006-01-01,Male,"Purok 1",torres.sample@gmail.com,,,,,`;
 
 export function YouthImport() {
+  // The duplicate check compares against every youth record in the organization.
+  return <NeedsStoreData keys={['youth']}><YouthImportView /></NeedsStoreData>;
+}
+
+function YouthImportView() {
   const { allows, importYouth, scoped, plan } = useStore();
   const [raw, setRaw] = useState('');
   const [preview, setPreview] = useState(null);
+  const [unsent, setUnsent] = useState(null);
+  const [skippedSelected, setSkippedSelected] = useState([]);
 
   const parse = (text) => {
     const lines = text.trim().split(/\r?\n/).filter(Boolean);
     if (lines.length < 2) return { error: 'The file needs a header row and at least one data row.' };
     const header = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'));
-    const missing = REQUIRED.filter((r) => !header.includes(r));
+    const missing = REQUIRED.filter((r) => (r === 'email' ? !(header.includes('email') || header.includes('gmail')) : !header.includes(r)));
     if (missing.length) return { error: `Missing required column(s): ${missing.join(', ')}.` };
 
-    const existing = new Set(scoped('youth').map((y) => `${y.firstName}|${y.lastName}|${y.birthDate}`.toLowerCase()));
+    const existing = new Set(scoped('youth').map((y) => `${y.firstName}|${y.middleName || ''}|${y.lastName}`.toLowerCase()));
     const seen = new Set();
     const valid = []; const invalid = []; const duplicates = [];
 
     lines.slice(1).forEach((line, index) => {
       const cells = line.match(/("[^"]*"|[^,]*)/g).filter((_, i) => i % 2 === 0).map((c) => c.replace(/^"|"$/g, '').trim());
       const row = Object.fromEntries(header.map((h, i) => [h, cells[i] ?? '']));
+      const email = row.email || row.gmail || '';
       const errors = REQUIRED.filter((r) => !row[r]).map((r) => `Missing ${r.replace(/_/g, ' ')}`);
+      if (email && !isGmail(email)) errors.push('Email must be a Gmail address, like name@gmail.com, or leave it blank.');
       if (row.birth_date && Number.isNaN(Date.parse(row.birth_date))) errors.push('Birth date is not a valid date (use YYYY-MM-DD)');
 
       const name = `${row.first_name} ${row.last_name}`.trim();
       if (errors.length) { invalid.push({ row: index + 2, name, errors }); return; }
 
-      const key = `${row.first_name}|${row.last_name}|${row.birth_date}`.toLowerCase();
+      const key = `${row.first_name}|${row.middle_name || ''}|${row.last_name}`.toLowerCase();
       if (existing.has(key) || seen.has(key)) { duplicates.push({ row: index + 2, name, errors: ['Already exists in your youth records'] }); return; }
       seen.add(key);
 
       valid.push({
         firstName: row.first_name, middleName: row.middle_name || '', lastName: row.last_name,
         birthDate: row.birth_date, gender: row.gender || 'Male', address: row.address,
-        contact: row.contact_number || '', civilStatus: 'Single',
+        contact: row.contact_number || '', email, civilStatus: 'Single',
         educationStatus: 'Currently Studying',
         education: row.education || 'Senior High School', school: row.school || '',
         course: '', yearLevel: '', strand: '', studying: true, employment: 'Student', occupation: '',
@@ -553,8 +609,8 @@ export function YouthImport() {
   if (!allows('csv_import')) {
     return (
       <>
-        <PageHeader title="Import youth records from CSV" />
-        <Empty title={`CSV import is not included in the ${plan.name} plan`}
+        <PageHeader title="Import youth records from CSV or Excel" />
+        <Empty title={`CSV and Excel import is not included in the ${plan.name} plan`}
           body="Upgrade to Basic or Premium to import an existing youth list. You can still add records one at a time.">
           <Link to="/sk/subscription/plans" className="btn btn-primary">View plans</Link>
         </Empty>
@@ -564,21 +620,75 @@ export function YouthImport() {
 
   return (
     <>
-      <PageHeader title="Import youth records from CSV"
-        subtitle="Paste your CSV, review the preview, then confirm. Nothing is saved until you confirm."
+      <PageHeader title="Import youth records from CSV or Excel"
+        subtitle="Choose a .csv or .xlsx file, or paste CSV text. Review the preview, then confirm. Nothing is saved until you confirm."
         actions={<button type="button" className="btn btn-ghost" onClick={() => setRaw(SAMPLE_CSV)}>Load sample CSV</button>} />
 
+      {unsent?.length > 0 && (
+        <Section title="Gmail notices that were not sent">
+          <p className="mt-1 text-sm text-[#5A6C82]">
+            These accounts exist, but the email did not go out. Give the temporary password to the youth directly. It is shown only here.
+          </p>
+          <div className="mt-3 max-h-80 overflow-auto rounded-lg border border-line">
+            <table className="w-full" style={{ minWidth: 640 }}>
+              <thead><tr><th className="th">Name</th><th className="th">Gmail</th><th className="th">Temporary password</th></tr></thead>
+              <tbody>
+                {unsent.map((row) => (
+                  <tr key={row.email}>
+                    <td className="td">{row.name}</td>
+                    <td className="td">{row.email}</td>
+                    <td className="td font-medium">{row.temporaryPassword}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
+
       {!preview ? (
-        <Section title="Step 1 — Paste the file contents">
+        <Section title="Step 1 — Choose a file or paste CSV">
           <p className="mt-1 text-sm text-[#5A6C82]">
             Required columns: first_name, last_name, birth_date (YYYY-MM-DD), gender, address.
-            Optional: middle_name, contact_number, education, school, family_income, family_members.
+            Optional: gmail, middle_name, contact_number, education, school, family_income, family_members.
+            A Gmail address creates a Youth account and emails the temporary password. A blank Gmail leaves the record without a login, so the youth registers with their own Gmail.
+            The first worksheet is used. A title above the header row is ignored.
           </p>
+          <label className="btn btn-ghost mt-4 inline-flex cursor-pointer">
+            Choose CSV or Excel file
+            <input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (!file) return;
+                const body = new FormData();
+                body.append('file', file);
+                api.post('/sk/youth/import/preview', body).then((result) => {
+                  const rows = Array.isArray(result?.rows) ? result.rows : [];
+                  const existing = new Set(scoped('youth').map((y) => `${y.firstName}|${y.middleName || ''}|${y.lastName}`.toLowerCase()));
+                  const valid = [];
+                  const duplicates = [];
+                  const invalid = [];
+                  rows.forEach((row, index) => {
+                    const name = `${row.firstName} ${row.lastName}`.trim();
+                    const key = `${row.firstName}|${row.middleName || ''}|${row.lastName}`.toLowerCase();
+                    if (row.email && !isGmail(row.email)) {
+                      invalid.push({ row: index + 2, name, errors: ['Email must be a Gmail address, like name@gmail.com, or leave it blank.'] });
+                    } else if (existing.has(key)) {
+                      duplicates.push({ row: index + 2, name, errors: ['Already exists in your youth records'] });
+                    } else valid.push(row);
+                  });
+                  setSkippedSelected([]);
+                  setPreview({ total: Number(result?.total) || rows.length, valid, invalid, duplicates });
+                }).catch((err) => window.alert(err?.message || 'The file could not be read.'));
+              }} />
+          </label>
           <textarea className="field mt-4 font-mono text-xs" rows="10" value={raw} onChange={(e) => setRaw(e.target.value)}
-            placeholder="first_name,last_name,birth_date,gender,address" />
+            placeholder="first_name,last_name,birth_date,gender,address,gmail" />
           <button type="button" className="btn btn-primary mt-4" onClick={() => {
             const result = parse(raw);
             if (result.error) { window.alert(result.error); return; }
+            setSkippedSelected([]);
             setPreview(result);
           }}>Validate and preview</button>
         </Section>
@@ -591,15 +701,56 @@ export function YouthImport() {
             <Stat label="Invalid" value={preview.invalid.length} />
           </div>
 
-          {[...preview.invalid, ...preview.duplicates].length > 0 && (
+          {[...preview.invalid, ...preview.duplicates].length > 0 && (() => {
+            const skipped = [
+              ...preview.invalid.map((row) => ({ ...row, skipKey: `invalid-${row.row}` })),
+              ...preview.duplicates.map((row) => ({ ...row, skipKey: `duplicate-${row.row}` })),
+            ];
+            const allSelected = skipped.length > 0 && skipped.every((row) => skippedSelected.includes(row.skipKey));
+            const toggleSkip = (key) => {
+              setSkippedSelected((current) => (
+                current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+              ));
+            };
+            const removeSkipped = () => {
+              const selected = new Set(skippedSelected);
+              setPreview((current) => ({
+                ...current,
+                invalid: current.invalid.filter((row) => !selected.has(`invalid-${row.row}`)),
+                duplicates: current.duplicates.filter((row) => !selected.has(`duplicate-${row.row}`)),
+              }));
+              setSkippedSelected([]);
+            };
+            return (
             <>
-              <h3 className="mt-6 text-sm font-semibold text-navy-900">Rows that will be skipped</h3>
+              <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-navy-900">Rows that will be skipped</h3>
+                <button type="button" className="btn btn-ghost btn-sm" disabled={skippedSelected.length === 0} onClick={removeSkipped}>
+                  Remove selected
+                </button>
+              </div>
               <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-line">
                 <table className="w-full">
-                  <thead><tr><th className="th">Row</th><th className="th">Name</th><th className="th">Problem</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th className="th w-10">
+                        <input type="checkbox" className="h-4 w-4 rounded border-[#C7D0DA]" aria-label="Select all skipped rows"
+                          checked={allSelected}
+                          onChange={() => setSkippedSelected(allSelected ? [] : skipped.map((row) => row.skipKey))} />
+                      </th>
+                      <th className="th">Row</th>
+                      <th className="th">Name</th>
+                      <th className="th">Problem</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {[...preview.invalid, ...preview.duplicates].map((row) => (
-                      <tr key={`${row.row}-${row.name}`}>
+                    {skipped.map((row) => (
+                      <tr key={row.skipKey}>
+                        <td className="td">
+                          <input type="checkbox" className="h-4 w-4 rounded border-[#C7D0DA]" aria-label={`Select row ${row.row}`}
+                            checked={skippedSelected.includes(row.skipKey)}
+                            onChange={() => toggleSkip(row.skipKey)} />
+                        </td>
                         <td className="td">{row.row}</td>
                         <td className="td">{row.name || '—'}</td>
                         <td className="td text-[#96201A]">{row.errors.join('; ')}</td>
@@ -609,7 +760,8 @@ export function YouthImport() {
                 </table>
               </div>
             </>
-          )}
+            );
+          })()}
 
           {preview.valid.length > 0 && (
             <>
@@ -634,8 +786,14 @@ export function YouthImport() {
 
           <div className="mt-6 flex flex-wrap gap-3">
             {preview.valid.length > 0 && (
-              <Confirm className="btn btn-primary" message={`Import ${preview.valid.length} youth records?`}
-                onConfirm={() => { importYouth(preview.valid); setPreview(null); setRaw(''); }}>
+              <Confirm className="btn btn-primary" message={`Import ${preview.valid.length} youth records? Rows with a Gmail address get an account and an email. Rows without one do not.`}
+                onConfirm={async () => {
+                  const result = await importYouth(preview.valid);
+                  if (!result) return;
+                  setUnsent(Array.isArray(result.unsent) ? result.unsent : []);
+                  setPreview(null);
+                  setRaw('');
+                }}>
                 Confirm import of {preview.valid.length} records
               </Confirm>
             )}

@@ -4,23 +4,42 @@ declare(strict_types=1);
 namespace YouthSync\Assistance;
 
 use PDO;
+use YouthSync\Admin\ActivityLog;
 use YouthSync\Http\Json;
+use YouthSync\Http\Pagination;
+use YouthSync\Notifications\EmailService;
+use YouthSync\Notifications\NotificationService;
 use YouthSync\Org\PlanLimits;
 
 final class AssistanceService
 {
-    public function __construct(private PDO $pdo)
-    {
+    public function __construct(
+        private PDO $pdo,
+        private ?NotificationService $notifications = null,
+        private ?EmailService $email = null,
+    ) {
     }
 
     public function countActive(int $organizationId): int
     {
-        $stmt = $this->pdo->prepare(
-            "SELECT COUNT(*) FROM assistance_programs
-             WHERE organization_id = :org AND status IN ('draft', 'open', 'full')"
-        );
-        $stmt->execute(['org' => $organizationId]);
-        return (int) $stmt->fetchColumn();
+        return PlanLimits::count($this->pdo, 'assistance', $organizationId);
+    }
+
+    /**
+     * When a write adds one active assistance program, lock the organization
+     * row and check the plan limit (403 PLAN_LIMIT_REACHED).
+     *
+     * @param array<string, mixed> $orgRow
+     */
+    private function lockForLimit(int $organizationId, array $orgRow, bool $addsActive): bool
+    {
+        $plan = PlanLimits::effective($orgRow);
+        if (!$addsActive || $plan['assistance'] === null) {
+            return false;
+        }
+        $locked = PlanLimits::lockOrganization($this->pdo, $organizationId);
+        PlanLimits::assertRoom($this->pdo, 'assistance', $plan, $this->countActive($organizationId));
+        return $locked;
     }
 
     /**
@@ -32,45 +51,46 @@ final class AssistanceService
     {
         $category = trim((string) ($query['category'] ?? ''));
         $status = trim((string) ($query['status'] ?? ''));
-        $q = trim((string) ($query['q'] ?? ''));
-        $page = max(1, (int) ($query['page'] ?? 1));
-        $perPage = (int) ($query['perPage'] ?? $query['per_page'] ?? 50);
-        if ($perPage < 1) {
-            $perPage = 50;
-        }
-        if ($perPage > 100) {
-            $perPage = 100;
-        }
+        $q = Pagination::search($query);
+        $paging = Pagination::fromQuery($query, 50, 100);
 
         $where = ['organization_id = :org'];
         $params = ['org' => $organizationId];
-        if ($category !== '' && $category !== 'all') {
-            $where[] = 'category = :category';
-            $params['category'] = $category;
-        }
         if ($status !== '') {
             $where[] = 'status = :status';
             $params['status'] = $status;
         }
+
+        // Category tab counts: same organization/status scope, before the
+        // category tab and the search box are applied (as the tabs always showed).
+        $countsStmt = $this->pdo->prepare(
+            'SELECT category, COUNT(*) AS n FROM assistance_programs WHERE ' . implode(' AND ', $where) . ' GROUP BY category'
+        );
+        $countsStmt->execute($params);
+        $counts = ['all' => 0];
+        foreach ($countsStmt->fetchAll() as $countRow) {
+            $counts[(string) $countRow['category']] = (int) $countRow['n'];
+            $counts['all'] += (int) $countRow['n'];
+        }
+
+        if ($category !== '' && $category !== 'all') {
+            $where[] = 'category = :category';
+            $params['category'] = $category;
+        }
         if ($q !== '') {
-            $where[] = '(name LIKE :q OR description LIKE :q)';
-            $params['q'] = '%' . $q . '%';
+            $where[] = Pagination::likeAny(['name', 'description'], $q, 'q', $params);
         }
         $sqlWhere = implode(' AND ', $where);
 
         $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM assistance_programs WHERE {$sqlWhere}");
         $countStmt->execute($params);
         $total = (int) $countStmt->fetchColumn();
-        $pages = max(1, (int) ceil(($total ?: 1) / $perPage));
-        if ($page > $pages) {
-            $page = $pages;
-        }
-        $offset = ($page - 1) * $perPage;
+        $meta = $paging->meta($total);
 
         $stmt = $this->pdo->prepare(
             "SELECT * FROM assistance_programs WHERE {$sqlWhere}
              ORDER BY created_at DESC, id DESC
-             LIMIT {$perPage} OFFSET {$offset}"
+             {$paging->limitSql()}"
         );
         $stmt->execute($params);
         $items = [];
@@ -84,10 +104,8 @@ final class AssistanceService
 
         return [
             'items' => $items,
-            'page' => $page,
-            'perPage' => $perPage,
-            'total' => $total,
-            'pages' => $pages,
+            ...$meta,
+            'counts' => $counts,
             'usage' => [
                 'assistance' => $usage,
                 'limit' => $limit,
@@ -105,11 +123,47 @@ final class AssistanceService
     }
 
     /**
+     * Open assistance a youth may apply for. Beneficiary lists are omitted.
+     *
+     * @return array{items: list<array<string, mixed>>}
+     */
+    public function listVisible(int $organizationId): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM assistance_programs
+             WHERE organization_id = :org AND status IN ('open', 'full')
+             ORDER BY deadline IS NULL, deadline ASC, id DESC"
+        );
+        $stmt->execute(['org' => $organizationId]);
+        $items = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $item = $this->publicProgram($row, true);
+            unset($item['beneficiaries']);
+            $items[] = $item;
+        }
+        return ['items' => $items];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function getVisible(int $organizationId, int $id): array
+    {
+        $row = $this->requireProgram($organizationId, $id);
+        if (!in_array((string) ($row['status'] ?? ''), ['open', 'full'], true)) {
+            Json::error('NOT_FOUND', 'That assistance program is not open.', 404);
+        }
+        $item = $this->publicProgram($row, true);
+        unset($item['beneficiaries']);
+        return $item;
+    }
+
+    /**
      * @param array<string, mixed> $input
      * @param array<string, mixed> $orgRow
      * @return array<string, mixed>
      */
-    public function create(int $organizationId, array $input, array $orgRow): array
+    public function create(int $organizationId, array $input, array $orgRow, array $actor = []): array
     {
         $values = AssistanceValidator::normalizeProgram($input);
         $errors = AssistanceValidator::validateProgram($values);
@@ -122,10 +176,7 @@ final class AssistanceService
         }
 
         $countsTowardLimit = in_array($values['status'], AssistanceValidator::ACTIVE_STATUSES, true);
-        $plan = PlanLimits::effective($orgRow);
-        if ($countsTowardLimit && $plan['assistance'] !== null && $this->countActive($organizationId) + 1 > $plan['assistance']) {
-            Json::error('PLAN_LIMIT', PlanLimits::assistanceLimitMessage($plan), 403);
-        }
+        $locked = $this->lockForLimit($organizationId, $orgRow, $countsTowardLimit);
 
         $sql = <<<SQL
             INSERT INTO assistance_programs (
@@ -141,7 +192,18 @@ final class AssistanceService
         $this->pdo->prepare($sql)->execute($this->bindProgram($organizationId, $values));
         $id = (int) $this->pdo->lastInsertId();
         $this->applyTypePreset($organizationId, $id, $values['typeId']);
-        return $this->get($organizationId, $id);
+        PlanLimits::releaseLock($this->pdo, $locked);
+        $program = $this->get($organizationId, $id);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.created',
+            'assistance',
+            'Created assistance program - ' . (string) ($program['name'] ?? $id),
+            ['entityType' => 'assistance', 'entityId' => $id]
+        );
+        return $program;
     }
 
     /**
@@ -149,7 +211,7 @@ final class AssistanceService
      * @param array<string, mixed> $orgRow
      * @return array<string, mixed>
      */
-    public function update(int $organizationId, int $id, array $input, array $orgRow): array
+    public function update(int $organizationId, int $id, array $input, array $orgRow, array $actor = []): array
     {
         $existingRow = $this->requireProgram($organizationId, $id);
         $existing = $this->publicProgram($existingRow, false);
@@ -166,12 +228,7 @@ final class AssistanceService
 
         $wasActive = in_array($existingRow['status'], AssistanceValidator::ACTIVE_STATUSES, true);
         $willBeActive = in_array($values['status'], AssistanceValidator::ACTIVE_STATUSES, true);
-        if (!$wasActive && $willBeActive) {
-            $plan = PlanLimits::effective($orgRow);
-            if ($plan['assistance'] !== null && $this->countActive($organizationId) + 1 > $plan['assistance']) {
-                Json::error('PLAN_LIMIT', PlanLimits::assistanceLimitMessage($plan), 403);
-            }
-        }
+        $locked = $this->lockForLimit($organizationId, $orgRow, !$wasActive && $willBeActive);
 
         $sql = <<<SQL
             UPDATE assistance_programs SET
@@ -191,22 +248,43 @@ final class AssistanceService
         if ($oldType !== $values['typeId']) {
             $this->applyTypePreset($organizationId, $id, $values['typeId']);
         }
+        PlanLimits::releaseLock($this->pdo, $locked);
 
-        return $this->get($organizationId, $id);
+        $program = $this->get($organizationId, $id);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.updated',
+            'assistance',
+            'Updated assistance program - ' . (string) ($program['name'] ?? $id),
+            ['entityType' => 'assistance', 'entityId' => $id]
+        );
+        return $program;
     }
 
     /**
      * @param array<string, mixed> $orgRow
      * @return array<string, mixed>
      */
-    public function archive(int $organizationId, int $id, array $orgRow): array
+    public function archive(int $organizationId, int $id, array $orgRow, array $actor = []): array
     {
-        return $this->update($organizationId, $id, ['status' => 'archived'], $orgRow);
+        $program = $this->update($organizationId, $id, ['status' => 'archived'], $orgRow, []);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.archived',
+            'assistance',
+            'Archived assistance program - ' . (string) ($program['name'] ?? $id),
+            ['entityType' => 'assistance', 'entityId' => $id]
+        );
+        return $program;
     }
 
-    public function delete(int $organizationId, int $id): void
+    public function delete(int $organizationId, int $id, array $actor = []): void
     {
-        $this->requireProgram($organizationId, $id);
+        $row = $this->requireProgram($organizationId, $id);
         $this->pdo->prepare(
             'DELETE FROM beneficiaries WHERE assistance_id = :id AND organization_id = :org'
         )->execute(['id' => $id, 'org' => $organizationId]);
@@ -216,6 +294,15 @@ final class AssistanceService
         $this->pdo->prepare(
             'DELETE FROM assistance_programs WHERE id = :id AND organization_id = :org'
         )->execute(['id' => $id, 'org' => $organizationId]);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.deleted',
+            'assistance',
+            'Deleted assistance program - ' . (string) ($row['name'] ?? $id),
+            ['entityType' => 'assistance', 'entityId' => $id]
+        );
     }
 
     /**
@@ -240,7 +327,7 @@ final class AssistanceService
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function createType(int $organizationId, array $input): array
+    public function createType(int $organizationId, array $input, array $actor = []): array
     {
         $values = AssistanceValidator::normalizeType($input);
         $errors = AssistanceValidator::validateType($values);
@@ -271,22 +358,45 @@ final class AssistanceService
             'category' => $values['category'],
             'requirements_json' => json_encode($tuples, JSON_UNESCAPED_UNICODE),
         ]);
-        return $this->publicType($this->typeRow((int) $this->pdo->lastInsertId()));
+        $typeId = (int) $this->pdo->lastInsertId();
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.type_created',
+            'assistance',
+            'Created assistance type - ' . (string) $values['name'],
+            ['entityType' => 'assistance_type', 'entityId' => $typeId]
+        );
+        return $this->publicType($this->typeRow($typeId));
     }
 
     /**
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function addRequirement(int $organizationId, array $input): array
+    public function addRequirement(int $organizationId, array $input, array $actor = []): array
     {
-        unset($input['organization_id'], $input['orgId'], $input['organizationId']);
+        unset($input['organization_id'], $input['orgId'], $input['organizationId'], $input['org_id']);
         $targetType = strtolower(trim((string) ($input['targetType'] ?? $input['target_type'] ?? 'assistance')));
-        if ($targetType !== 'assistance') {
-            Json::error('VALIDATION_ERROR', 'Requirements in this phase can only be attached to assistance programs.', 422);
+        $targetId = (int) ($input['targetId'] ?? $input['target_id'] ?? $input['assistanceId'] ?? $input['programId'] ?? 0);
+        $assistanceId = null;
+        $programId = null;
+        if ($targetType === 'assistance') {
+            $this->requireProgram($organizationId, $targetId);
+            $assistanceId = $targetId;
+        } elseif ($targetType === 'program' || $targetType === 'event') {
+            $activity = $this->requireActivity($organizationId, $targetId);
+            if ($targetType === 'event' && (string) $activity['kind'] !== 'event') {
+                Json::error('VALIDATION_ERROR', 'That activity is not an event.', 422);
+            }
+            if ($targetType === 'program' && !in_array((string) $activity['kind'], ['program', 'event'], true)) {
+                Json::error('VALIDATION_ERROR', 'Requirements can only be attached to a program or event.', 422);
+            }
+            $programId = $targetId;
+        } else {
+            Json::error('VALIDATION_ERROR', 'Requirements can be attached to assistance programs, programs, or events.', 422);
         }
-        $targetId = (int) ($input['targetId'] ?? $input['target_id'] ?? $input['assistanceId'] ?? 0);
-        $this->requireProgram($organizationId, $targetId);
         $values = AssistanceValidator::normalizeRequirement($input);
         $errors = AssistanceValidator::validateRequirement($values);
         if ($errors) {
@@ -294,27 +404,38 @@ final class AssistanceService
         }
         $stmt = $this->pdo->prepare(
             'INSERT INTO assistance_requirements (
-                organization_id, assistance_id, name, description, required, accepts, from_type
+                organization_id, assistance_id, program_id, name, description, required, accepts, from_type
             ) VALUES (
-                :organization_id, :assistance_id, :name, :description, :required, :accepts, 0
+                :organization_id, :assistance_id, :program_id, :name, :description, :required, :accepts, 0
             )'
         );
         $stmt->execute([
             'organization_id' => $organizationId,
-            'assistance_id' => $targetId,
+            'assistance_id' => $assistanceId,
+            'program_id' => $programId,
             'name' => $values['name'],
             'description' => $values['description'],
             'required' => $values['required'] ? 1 : 0,
             'accepts' => $values['accepts'],
         ]);
-        return $this->publicRequirement($this->requirementRow($organizationId, (int) $this->pdo->lastInsertId()));
+        $created = $this->publicRequirement($this->requirementRow($organizationId, (int) $this->pdo->lastInsertId()));
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'requirement.created',
+            'requirement',
+            'Added requirement "' . (string) ($created['name'] ?? $created['id']) . '"',
+            ['entityType' => 'requirement', 'entityId' => (int) $created['id']]
+        );
+        return $created;
     }
 
     /**
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function updateRequirement(int $organizationId, int $id, array $input): array
+    public function updateRequirement(int $organizationId, int $id, array $input, array $actor = []): array
     {
         $row = $this->requirementRow($organizationId, $id);
         $merged = array_merge($this->publicRequirement($row), $input);
@@ -335,22 +456,41 @@ final class AssistanceService
             'id' => $id,
             'org' => $organizationId,
         ]);
-        return $this->publicRequirement($this->requirementRow($organizationId, $id));
+        $updated = $this->publicRequirement($this->requirementRow($organizationId, $id));
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'requirement.updated',
+            'requirement',
+            'Updated requirement "' . (string) ($updated['name'] ?? $id) . '"',
+            ['entityType' => 'requirement', 'entityId' => $id]
+        );
+        return $updated;
     }
 
-    public function deleteRequirement(int $organizationId, int $id): void
+    public function deleteRequirement(int $organizationId, int $id, array $actor = []): void
     {
-        $this->requirementRow($organizationId, $id);
+        $row = $this->requirementRow($organizationId, $id);
         $this->pdo->prepare(
             'DELETE FROM assistance_requirements WHERE id = :id AND organization_id = :org'
         )->execute(['id' => $id, 'org' => $organizationId]);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'requirement.deleted',
+            'requirement',
+            'Deleted requirement "' . (string) ($row['name'] ?? $id) . '"',
+            ['entityType' => 'requirement', 'entityId' => $id]
+        );
     }
 
     /**
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function saveBeneficiary(int $organizationId, int $assistanceId, array $input): array
+    public function saveBeneficiary(int $organizationId, int $assistanceId, array $input, array $actor = []): array
     {
         $program = $this->requireProgram($organizationId, $assistanceId);
         $values = AssistanceValidator::normalizeBeneficiary($input);
@@ -401,29 +541,49 @@ final class AssistanceService
                 'remarks' => $values['remarks'],
             ]);
             $id = (int) $this->pdo->lastInsertId();
-            return $this->publicBeneficiary($this->beneficiaryRow($organizationId, $id));
+            $saved = $this->publicBeneficiary($this->beneficiaryRow($organizationId, $id));
+        } else {
+            $this->pdo->prepare(
+                'UPDATE beneficiaries
+                 SET status = :status, awarded_on = :awarded_on, remarks = :remarks
+                 WHERE id = :id AND organization_id = :org'
+            )->execute([
+                'status' => $values['status'],
+                'awarded_on' => $awarded,
+                'remarks' => $values['remarks'],
+                'id' => (int) $existing['id'],
+                'org' => $organizationId,
+            ]);
+            $saved = $this->publicBeneficiary($this->beneficiaryRow($organizationId, (int) $existing['id']));
         }
 
-        $this->pdo->prepare(
-            'UPDATE beneficiaries
-             SET status = :status, awarded_on = :awarded_on, remarks = :remarks
-             WHERE id = :id AND organization_id = :org'
-        )->execute([
-            'status' => $values['status'],
-            'awarded_on' => $awarded,
-            'remarks' => $values['remarks'],
-            'id' => (int) $existing['id'],
-            'org' => $organizationId,
-        ]);
-        return $this->publicBeneficiary($this->beneficiaryRow($organizationId, (int) $existing['id']));
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.beneficiary_added',
+            'assistance',
+            'Recorded beneficiary for assistance program - ' . (string) ($program['name'] ?? $assistanceId),
+            ['youthId' => $values['youthId'], 'entityType' => 'beneficiary', 'entityId' => (int) ($saved['id'] ?? 0)]
+        );
+        return $saved;
     }
 
-    public function deleteBeneficiary(int $organizationId, int $id): void
+    public function deleteBeneficiary(int $organizationId, int $id, array $actor = []): void
     {
-        $this->beneficiaryRow($organizationId, $id);
+        $row = $this->beneficiaryRow($organizationId, $id);
         $this->pdo->prepare(
             'DELETE FROM beneficiaries WHERE id = :id AND organization_id = :org'
         )->execute(['id' => $id, 'org' => $organizationId]);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.beneficiary_removed',
+            'assistance',
+            'Removed beneficiary ' . (string) ($row['code'] ?? ('#' . $id)),
+            ['youthId' => (int) ($row['youth_id'] ?? 0), 'entityType' => 'beneficiary', 'entityId' => $id]
+        );
     }
 
     /**
@@ -596,11 +756,14 @@ final class AssistanceService
     private function beneficiariesFor(int $organizationId, int $assistanceId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT b.*, y.code, y.first_name, y.last_name, y.priority_level, y.archived
+            "SELECT b.*, y.code, y.first_name, y.last_name, y.priority_level, y.archived
              FROM beneficiaries b
              INNER JOIN youth y ON y.id = b.youth_id
              WHERE b.organization_id = :org AND b.assistance_id = :id
-             ORDER BY b.id DESC'
+             ORDER BY FIELD(y.priority_level, 'High', 'Medium'),
+                      CASE WHEN y.family_income > 0 THEN 0 ELSE 1 END,
+                      y.family_income ASC,
+                      b.id DESC"
         );
         $stmt->execute(['org' => $organizationId, 'id' => $assistanceId]);
         $items = [];
@@ -656,16 +819,37 @@ final class AssistanceService
      */
     private function publicRequirement(array $row): array
     {
+        $programId = (int) ($row['program_id'] ?? 0);
+        $assistanceId = (int) ($row['assistance_id'] ?? 0);
         return [
             'id' => (int) $row['id'],
-            'targetType' => 'assistance',
-            'targetId' => (int) $row['assistance_id'],
+            'targetType' => $programId > 0 ? 'program' : 'assistance',
+            'targetId' => $programId > 0 ? $programId : $assistanceId,
             'name' => $row['name'],
             'description' => $row['description'],
             'required' => (bool) $row['required'],
             'accepts' => $row['accepts'],
             'fromType' => (bool) $row['from_type'],
         ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function requireActivity(int $organizationId, int $id): array
+    {
+        if ($id < 1) {
+            Json::error('NOT_FOUND', 'This program or event does not exist in this organization.', 404);
+        }
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM programs WHERE id = :id AND organization_id = :org LIMIT 1'
+        );
+        $stmt->execute(['id' => $id, 'org' => $organizationId]);
+        $row = $stmt->fetch();
+        if ($row === false) {
+            Json::error('NOT_FOUND', 'This program or event does not exist in this organization.', 404);
+        }
+        return $row;
     }
 
     /**
@@ -715,6 +899,197 @@ final class AssistanceService
         $stmt->execute(['id' => $id]);
         $row = $stmt->fetch();
         return $row === false ? null : $row;
+    }
+
+    /**
+     * Invite youth to an assistance program by email. They confirm in their account.
+     * No SMS is sent.
+     *
+     * @param list<int> $youthIds
+     * @param array<string, mixed> $actor
+     * @return array<string, mixed>
+     */
+    public function invite(int $organizationId, int $assistanceId, array $youthIds, array $actor = []): array
+    {
+        $program = $this->requireProgram($organizationId, $assistanceId);
+        $ids = [];
+        foreach ($youthIds as $youthId) {
+            $youthId = (int) $youthId;
+            if ($youthId > 0) {
+                $ids[$youthId] = $youthId;
+            }
+        }
+        if ($ids === []) {
+            Json::validation(['youthIds' => 'Select at least one youth.']);
+        }
+
+        $name = (string) $program['name'];
+        $invited = 0;
+        $skipped = [];
+        $unsent = [];
+
+        foreach ($ids as $youthId) {
+            $stmt = $this->pdo->prepare(
+                'SELECT y.id, y.first_name, y.last_name, y.email AS profile_email, y.archived,
+                        u.id AS user_id, u.email AS login_email, u.status AS user_status
+                 FROM youth y
+                 LEFT JOIN users u ON u.youth_id = y.id
+                 WHERE y.id = :id AND y.organization_id = :org
+                 LIMIT 1'
+            );
+            $stmt->execute(['id' => $youthId, 'org' => $organizationId]);
+            $youth = $stmt->fetch();
+            if ($youth === false || (int) $youth['archived'] === 1) {
+                $skipped[] = ['youthId' => $youthId, 'reason' => 'This youth record is not active in this organization.'];
+                continue;
+            }
+            if ((int) ($youth['user_id'] ?? 0) < 1 || (string) ($youth['user_status'] ?? '') !== 'active') {
+                $skipped[] = [
+                    'youthId' => $youthId,
+                    'name' => trim($youth['first_name'] . ' ' . $youth['last_name']),
+                    'reason' => 'This youth has no active YouthSync account yet, so they cannot confirm.',
+                ];
+                continue;
+            }
+
+            $existing = $this->findBeneficiary($organizationId, $assistanceId, $youthId);
+            if ($existing && in_array((string) $existing['status'], ['approved', 'released', 'confirmed'], true)) {
+                $skipped[] = [
+                    'youthId' => $youthId,
+                    'name' => trim($youth['first_name'] . ' ' . $youth['last_name']),
+                    'reason' => 'This youth already joined this program.',
+                ];
+                continue;
+            }
+
+            if ($existing === null) {
+                $this->pdo->prepare(
+                    'INSERT INTO beneficiaries (organization_id, assistance_id, youth_id, status, awarded_on, remarks)
+                     VALUES (:organization_id, :assistance_id, :youth_id, :status, NULL, :remarks)'
+                )->execute([
+                    'organization_id' => $organizationId,
+                    'assistance_id' => $assistanceId,
+                    'youth_id' => $youthId,
+                    'status' => 'invited',
+                    'remarks' => '',
+                ]);
+            } else {
+                $this->pdo->prepare(
+                    'UPDATE beneficiaries SET status = :status, awarded_on = NULL WHERE id = :id AND organization_id = :org'
+                )->execute(['status' => 'invited', 'id' => (int) $existing['id'], 'org' => $organizationId]);
+            }
+
+            $fullName = trim($youth['first_name'] . ' ' . $youth['last_name']);
+            $link = '/youth/assistance/' . $assistanceId;
+            if ($this->notifications !== null) {
+                $this->notifications->notifyYouth($organizationId, $youthId, [
+                    'type' => 'assistance',
+                    'title' => 'Invitation: ' . $name,
+                    'message' => 'You are invited to ' . $name . '. Open YouthSync and confirm if you will join. No text message was sent.',
+                    'link' => $link,
+                    'related' => $name,
+                    'relatedEntityType' => 'assistance',
+                    'relatedEntityId' => $assistanceId,
+                ]);
+            }
+
+            $to = strtolower(trim((string) ($youth['login_email'] ?: $youth['profile_email'])));
+            $sent = false;
+            if ($to !== '' && $this->email !== null && $this->email->isConfigured()) {
+                $result = $this->email->send(
+                    $to,
+                    'You are invited to ' . $name,
+                    '<p>Hello ' . htmlspecialchars($fullName, ENT_QUOTES) . ',</p>'
+                    . '<p>Your SK invited you to <strong>' . htmlspecialchars($name, ENT_QUOTES) . '</strong>.</p>'
+                    . '<p>Sign in to YouthSync and confirm if you will join. This invitation was sent by email only.</p>',
+                    "Hello {$fullName},\n\nYour SK invited you to {$name}.\nSign in to YouthSync and confirm if you will join."
+                );
+                $sent = (bool) ($result['ok'] ?? false);
+            }
+            if (!$sent) {
+                $unsent[] = [
+                    'youthId' => $youthId,
+                    'name' => $fullName,
+                    'email' => $to,
+                    'reason' => $to === '' ? 'No email address on this account.' : 'The invitation email could not be sent.',
+                ];
+            }
+            $invited++;
+        }
+
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'assistance.invite',
+            'assistance',
+            'Invited youth to ' . $name
+        );
+
+        return ['invited' => $invited, 'skipped' => $skipped, 'unsent' => $unsent];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function respondToInvitation(int $organizationId, int $youthId, int $assistanceId, string $decision): array
+    {
+        $program = $this->requireProgram($organizationId, $assistanceId);
+        $existing = $this->findBeneficiary($organizationId, $assistanceId, $youthId);
+        if ($existing === null || (string) $existing['status'] !== 'invited') {
+            Json::error('NOT_FOUND', 'There is no open invitation for you on this program.', 404);
+        }
+        $join = $decision === 'join';
+        $status = $join ? 'confirmed' : 'declined';
+        $this->pdo->prepare(
+            'UPDATE beneficiaries SET status = :status, awarded_on = :awarded WHERE id = :id AND organization_id = :org'
+        )->execute([
+            'status' => $status,
+            'awarded' => $join ? date('Y-m-d') : null,
+            'id' => (int) $existing['id'],
+            'org' => $organizationId,
+        ]);
+
+        $youth = $this->youthInOrg($organizationId, $youthId);
+        $fullName = $youth ? trim($youth['first_name'] . ' ' . $youth['last_name']) : 'A youth';
+        $name = (string) $program['name'];
+        if ($this->notifications !== null) {
+            $this->notifications->notifySk($organizationId, [
+                'type' => 'assistance',
+                'title' => $fullName . ($join ? ' will join ' : ' declined ') . $name,
+                'message' => $fullName . ($join ? ' confirmed they will join ' : ' declined the invitation to ') . $name . '.',
+                'link' => '/sk/assistance/' . $assistanceId,
+                'related' => $name,
+                'relatedEntityType' => 'assistance',
+                'relatedEntityId' => $assistanceId,
+            ]);
+        }
+
+        return $this->publicBeneficiary($this->beneficiaryRow($organizationId, (int) $existing['id']));
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function invitationsForYouth(int $organizationId, int $youthId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT b.*, y.code, y.first_name, y.last_name, y.priority_level, p.name AS program_name
+             FROM beneficiaries b
+             INNER JOIN youth y ON y.id = b.youth_id
+             INNER JOIN assistance_programs p ON p.id = b.assistance_id
+             WHERE b.organization_id = :org AND b.youth_id = :youth
+               AND b.status IN (\'invited\', \'confirmed\', \'declined\')
+             ORDER BY b.id DESC'
+        );
+        $stmt->execute(['org' => $organizationId, 'youth' => $youthId]);
+        $items = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $item = $this->publicBeneficiary($row);
+            $item['programName'] = $row['program_name'];
+            $items[] = $item;
+        }
+        return $items;
     }
 
     /**

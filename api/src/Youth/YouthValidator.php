@@ -13,7 +13,7 @@ final class YouthValidator
         'College', 'Vocational/Technical', 'Graduate/Finished School',
     ];
     public const EMPLOYMENT = ['Student', 'Employed', 'Unemployed', 'Self-employed'];
-    public const GUARDIAN_EMPLOYMENT = ['Employed', 'Unemployed', 'Self-employed'];
+    public const GUARDIAN_EMPLOYMENT = ['Employed', 'Unemployed', 'Self-employed', 'Retired'];
 
     /**
      * @param array<string, mixed> $input

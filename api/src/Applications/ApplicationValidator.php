@@ -25,6 +25,7 @@ final class ApplicationValidator
             $input['reviewedBy']
         );
         $assistanceId = (int) (self::pick($input, 'assistanceId', 0) ?? 0);
+        $programId = (int) (self::pick($input, 'programId', 0) ?? 0);
         $youthId = (int) (self::pick($input, 'youthId', 0) ?? 0);
         $submissions = self::pick($input, 'submissions', []);
         if (!is_array($submissions)) {
@@ -39,6 +40,7 @@ final class ApplicationValidator
         }
         return [
             'assistanceId' => $assistanceId,
+            'programId' => $programId,
             'youthId' => $youthId,
             'remarks' => mb_substr(trim((string) (self::pick($input, 'remarks', '') ?? '')), 0, 1000),
             'submissions' => $normalizedSubs,
@@ -52,8 +54,12 @@ final class ApplicationValidator
     public static function validateCreate(array $values): array
     {
         $errors = [];
-        if ($values['assistanceId'] < 1) {
-            $errors['assistanceId'] = 'Select an assistance program.';
+        $assistanceId = (int) ($values['assistanceId'] ?? 0);
+        $programId = (int) ($values['programId'] ?? 0);
+        if ($assistanceId > 0 && $programId > 0) {
+            $errors['programId'] = 'Choose either a program or an assistance program.';
+        } elseif ($assistanceId < 1 && $programId < 1) {
+            $errors['assistanceId'] = 'Select a program, event, or assistance program.';
         }
         if ($values['youthId'] < 1) {
             $errors['youthId'] = 'Select a youth record.';

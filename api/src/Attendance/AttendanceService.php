@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace YouthSync\Attendance;
 
 use PDO;
+use YouthSync\Admin\ActivityLog;
 use YouthSync\Http\Json;
 use YouthSync\Org\PlanLimits;
 
@@ -21,7 +22,7 @@ final class AttendanceService
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function createSession(int $organizationId, int $programId, int $userId, array $orgRow, array $input): array
+    public function createSession(int $organizationId, int $programId, int $userId, array $orgRow, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['orgId'], $input['organizationId']);
         $program = $this->requireProgram($organizationId, $programId);
@@ -60,6 +61,15 @@ final class AttendanceService
         $payload['token'] = $plain;
         $payload['program'] = $this->publicProgram($program);
         $payload['qrRemaining'] = $this->qrRemaining($organizationId, $orgRow);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'attendance.session_created',
+            'attendance',
+            'Opened attendance session for ' . (string) ($program['name'] ?? $programId),
+            ['entityType' => 'attendance_session', 'entityId' => $id]
+        );
         return $payload;
     }
 
@@ -83,7 +93,7 @@ final class AttendanceService
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function scan(int $organizationId, array $orgRow, array $input): array
+    public function scan(int $organizationId, array $orgRow, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['orgId'], $input['organizationId']);
         $this->assertQrAvailable($organizationId, $orgRow);
@@ -137,7 +147,7 @@ final class AttendanceService
             Json::error('NOT_FOUND', "No youth in your barangay matches {$code}.", 404);
         }
 
-        $this->consumeQr($organizationId);
+        $this->consumeQr($organizationId, $orgRow);
 
         if ((int) $youth['archived'] === 1) {
             Json::error('VALIDATION_ERROR', 'Attendance cannot be recorded for an archived youth record.', 422);
@@ -187,7 +197,7 @@ final class AttendanceService
             $created = false;
         }
 
-        return [
+        $result = [
             'pending' => true,
             'created' => $created,
             'message' => "{$youth['first_name']} {$youth['last_name']} ({$code}) identified for {$program['name']}. Confirm to record attendance.",
@@ -196,13 +206,23 @@ final class AttendanceService
             'program' => $this->publicProgram($program),
             'qrRemaining' => $this->qrRemaining($organizationId, $orgRow),
         ];
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'qr.scan',
+            'qr',
+            'Scanned youth QR for ' . (string) ($program['name'] ?? $programId),
+            ['youthId' => (int) $youth['id'], 'entityType' => 'attendance', 'entityId' => (int) ($attendance['id'] ?? 0)]
+        );
+        return $result;
     }
 
     /**
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function confirm(int $organizationId, array $input): array
+    public function confirm(int $organizationId, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['orgId'], $input['organizationId']);
         $id = (int) ($input['attendanceId'] ?? $input['attendance_id'] ?? $input['id'] ?? 0);
@@ -232,19 +252,29 @@ final class AttendanceService
         $stamp = $this->formatStamp($attendance['scanned_at']);
         $name = $youth ? "{$youth['first_name']} {$youth['last_name']}" : 'Youth';
 
-        return [
+        $result = [
             'message' => "{$name} marked present at {$stamp}.",
             'attendance' => $this->publicAttendance($attendance, $youth, $program),
             'youth' => $youth ? $this->publicYouth($youth) : null,
             'program' => $this->publicProgram($program),
         ];
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'attendance.confirmed',
+            'attendance',
+            $name . ' marked present',
+            ['youthId' => (int) $attendance['youth_id'], 'entityType' => 'attendance', 'entityId' => $id]
+        );
+        return $result;
     }
 
     /**
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function manual(int $organizationId, array $input): array
+    public function manual(int $organizationId, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['orgId'], $input['organizationId']);
         $programId = (int) ($input['programId'] ?? $input['program_id'] ?? 0);
@@ -296,13 +326,23 @@ final class AttendanceService
             $attendance = $this->requireAttendance($organizationId, (int) $existing['id']);
         }
 
-        return [
+        $result = [
             'pending' => true,
             'message' => "{$youth['first_name']} {$youth['last_name']} identified for {$program['name']}. Confirm to record attendance.",
             'attendance' => $this->publicAttendance($attendance, $youth, $program),
             'youth' => $this->publicYouth($youth),
             'program' => $this->publicProgram($program),
         ];
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'attendance.manual_recorded',
+            'attendance',
+            "{$youth['first_name']} {$youth['last_name']} identified for {$program['name']}",
+            ['youthId' => $youthId, 'entityType' => 'attendance', 'entityId' => (int) ($attendance['id'] ?? 0)]
+        );
+        return $result;
     }
 
     /**
@@ -334,6 +374,140 @@ final class AttendanceService
     }
 
     /**
+     * Youth self-check-in. The youth and organization come from the session.
+     * The attendance code identifies the active session and its program or event.
+     *
+     * @param array<string, mixed> $input
+     * @param array<string, mixed> $actor
+     * @return array<string, mixed>
+     */
+    public function checkIn(int $organizationId, int $youthId, array $input, array $actor = []): array
+    {
+        unset(
+            $input['organization_id'],
+            $input['organizationId'],
+            $input['orgId'],
+            $input['youth_id'],
+            $input['youthId'],
+            $input['user_id'],
+            $input['userId'],
+            $input['role'],
+            $input['program_id'],
+            $input['programId']
+        );
+        if ($youthId < 1 || $organizationId < 1) {
+            Json::error('FORBIDDEN', 'This youth account is not linked to a youth record.', 403);
+        }
+
+        $code = strtoupper(trim((string) ($input['code'] ?? $input['token'] ?? '')));
+        if ($code === '' || preg_match('/^ATT-[A-F0-9]{8}$/', $code) !== 1) {
+            Json::validation(['code' => 'Enter the attendance code from the activity.']);
+        }
+
+        $session = $this->sessionByPublicCode($code);
+        if ($session === null || (int) $session['organization_id'] !== $organizationId) {
+            Json::error('NOT_FOUND', 'This attendance code is not valid.', 404);
+        }
+        if ($session['status'] !== 'active') {
+            Json::error('SESSION_EXPIRED', 'This attendance session is closed.', 422);
+        }
+        $fresh = $this->pdo->prepare(
+            "SELECT id FROM attendance_qr_tokens
+             WHERE id = :id AND status = 'active' AND expires_at > NOW()
+             LIMIT 1"
+        );
+        $fresh->execute(['id' => (int) $session['id']]);
+        if ($fresh->fetch() === false) {
+            Json::error('SESSION_EXPIRED', 'This attendance session is invalid or has expired.', 422);
+        }
+
+        $program = $this->requireProgram($organizationId, (int) $session['program_id']);
+        $this->assertEligible($program);
+        $youth = $this->youthById($organizationId, $youthId);
+        if ($youth === null) {
+            Json::error('NOT_FOUND', 'This youth record does not exist in this organization.', 404);
+        }
+        if ((int) $youth['archived'] === 1) {
+            Json::error('VALIDATION_ERROR', 'Attendance cannot be recorded for an archived youth record.', 422);
+        }
+
+        $existing = $this->findAttendance($organizationId, (int) $program['id'], $youthId);
+        if ($existing !== null) {
+            Json::error('ATTENDANCE_ALREADY_RECORDED', 'Attendance already recorded.', 409);
+        }
+
+        $ins = $this->pdo->prepare(
+            'INSERT INTO attendance (
+                organization_id, program_id, youth_id, session_id, status, source, scanned_at, confirmed_at
+            ) VALUES (
+                :organization_id, :program_id, :youth_id, :session_id, :status, :source, NOW(), NOW()
+            )'
+        );
+        $ins->execute([
+            'organization_id' => $organizationId,
+            'program_id' => (int) $program['id'],
+            'youth_id' => $youthId,
+            'session_id' => (int) $session['id'],
+            'status' => 'present',
+            'source' => 'self',
+        ]);
+        $attendance = $this->requireAttendance($organizationId, (int) $this->pdo->lastInsertId());
+        ActivityLog::record($this->pdo, [
+            'organizationId' => $organizationId,
+            'userId' => (int) ($actor['id'] ?? 0),
+            'youthId' => $youthId,
+            'actorName' => trim(($youth['first_name'] ?? '') . ' ' . ($youth['last_name'] ?? '')),
+            'actorRole' => 'YOUTH',
+            'action' => 'attendance.check_in',
+            'category' => 'attendance',
+            'description' => trim(($youth['first_name'] ?? '') . ' ' . ($youth['last_name'] ?? '')) . ' checked in for ' . (string) $program['name'],
+            'entityType' => 'attendance',
+            'entityId' => (int) $attendance['id'],
+        ]);
+
+        return [
+            'message' => 'Attendance recorded successfully.',
+            'attendance' => $this->publicAttendance($attendance, $youth, $program),
+            'program' => $this->publicProgram($program),
+        ];
+    }
+
+    /**
+     * Attendance for the authenticated youth only. Client youth and organization ids are ignored.
+     *
+     * @param array<string, mixed> $query
+     * @return array{items: list<array<string, mixed>>}
+     */
+    public function listForYouth(int $organizationId, int $youthId, array $query = []): array
+    {
+        unset($query['organization_id'], $query['organizationId'], $query['youth_id'], $query['youthId'], $query['role']);
+        if ($youthId < 1) {
+            Json::error('FORBIDDEN', 'This youth account is not linked to a youth record.', 403);
+        }
+        $stmt = $this->pdo->prepare(
+            'SELECT a.*, p.kind, p.name, p.status AS program_status, p.scheduled_on, p.location
+             FROM attendance a
+             INNER JOIN programs p ON p.id = a.program_id AND p.organization_id = a.organization_id
+             WHERE a.organization_id = :org AND a.youth_id = :youth
+             ORDER BY COALESCE(a.confirmed_at, a.scanned_at, a.created_at) DESC, a.id DESC'
+        );
+        $stmt->execute(['org' => $organizationId, 'youth' => $youthId]);
+        $items = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $program = [
+                'id' => (int) $row['program_id'],
+                'kind' => $row['kind'],
+                'name' => $row['name'],
+                'status' => $row['program_status'],
+                'scheduled_on' => $row['scheduled_on'],
+                'location' => $row['location'],
+            ];
+            $items[] = $this->publicAttendance($row, null, $program);
+        }
+        return ['items' => $items];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function get(int $organizationId, int $id): array
@@ -348,7 +522,7 @@ final class AttendanceService
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function updateStatus(int $organizationId, int $id, array $input): array
+    public function updateStatus(int $organizationId, int $id, array $input, array $actor = []): array
     {
         unset($input['organization_id'], $input['orgId'], $input['organizationId']);
         $status = strtolower(trim((string) ($input['status'] ?? '')));
@@ -378,7 +552,17 @@ final class AttendanceService
             'org' => $organizationId,
         ]);
 
-        return $this->get($organizationId, $id);
+        $saved = $this->get($organizationId, $id);
+        ActivityLog::recordSk(
+            $this->pdo,
+            $organizationId,
+            $actor,
+            'attendance.recorded',
+            'attendance',
+            'Set attendance status to ' . $status,
+            ['youthId' => (int) $row['youth_id'], 'entityType' => 'attendance', 'entityId' => $id]
+        );
+        return $saved;
     }
 
     /**
@@ -391,17 +575,31 @@ final class AttendanceService
         if ($limit === null) {
             return;
         }
-        $uses = $this->qrUses($organizationId);
-        if ($uses >= $limit) {
-            Json::error('PLAN_LIMIT', PlanLimits::qrLimitMessage($plan), 403);
-        }
+        PlanLimits::assertRoom($this->pdo, 'qr', $plan, $this->qrUses($organizationId));
     }
 
-    private function consumeQr(int $organizationId): void
+    /**
+     * Lifetime QR counter. With a finite limit the increment is conditional,
+     * so concurrent scans can never push qr_uses past the plan limit.
+     *
+     * @param array<string, mixed> $orgRow
+     */
+    private function consumeQr(int $organizationId, array $orgRow): void
     {
-        $this->pdo->prepare(
-            'UPDATE organizations SET qr_uses = qr_uses + 1 WHERE id = :id'
-        )->execute(['id' => $organizationId]);
+        $plan = PlanLimits::effective($orgRow);
+        if ($plan['qr'] === null) {
+            $this->pdo->prepare(
+                'UPDATE organizations SET qr_uses = qr_uses + 1 WHERE id = :id'
+            )->execute(['id' => $organizationId]);
+            return;
+        }
+        $stmt = $this->pdo->prepare(
+            'UPDATE organizations SET qr_uses = qr_uses + 1 WHERE id = :id AND qr_uses < :limit'
+        );
+        $stmt->execute(['id' => $organizationId, 'limit' => (int) $plan['qr']]);
+        if ($stmt->rowCount() !== 1) {
+            PlanLimits::assertRoom($this->pdo, 'qr', $plan, $this->qrUses($organizationId));
+        }
     }
 
     private function qrUses(int $organizationId): int
@@ -425,7 +623,7 @@ final class AttendanceService
 
     private function parseYouthToken(string $token): ?string
     {
-        if (preg_match('/^YSYOUTH-(YTH-\d+)$/i', trim($token), $m) !== 1) {
+        if (preg_match('/^YSYOUTH-([A-Z0-9-]{1,32})$/i', trim($token), $m) !== 1) {
             return null;
         }
         return strtoupper($m[1]);
@@ -516,6 +714,22 @@ final class AttendanceService
             Json::error('NOT_FOUND', 'This attendance record does not exist in this organization.', 404);
         }
         return $row;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function sessionByPublicCode(string $code): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM attendance_qr_tokens WHERE public_code = :code LIMIT 1'
+        );
+        $stmt->execute(['code' => $code]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
     }
 
     /**
@@ -633,6 +847,7 @@ final class AttendanceService
             'name' => $row['name'],
             'status' => $row['status'],
             'scheduledOn' => $row['scheduled_on'] ?? $row['scheduledOn'] ?? null,
+            'location' => $row['location'] ?? '',
         ];
     }
 
