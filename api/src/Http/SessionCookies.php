@@ -43,6 +43,10 @@ final class SessionCookies
         if (is_string($https) && $https !== '' && strtolower($https) !== 'off') {
             return true;
         }
+        $forwarded = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
+        if (is_string($forwarded) && strtolower(trim(explode(',', $forwarded)[0])) === 'https') {
+            return true;
+        }
         return (int) ($_SERVER['SERVER_PORT'] ?? 80) === 443;
     }
 
