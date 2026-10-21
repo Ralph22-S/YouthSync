@@ -193,8 +193,8 @@ function ProgramDetailView() {
         <Stat label="Registration closes" value={program.registrationDeadline || 'Open'} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2">
+      <div className="grid items-start gap-4 lg:grid-cols-3">
+        <div className="space-y-4 lg:col-span-2">
           <Section title="Registered participants"
             action={<button type="button" className="btn btn-ghost btn-sm" onClick={() => window.print()}>Print list</button>}>
             <input className="field mt-4" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search participants by name" />
@@ -225,6 +225,33 @@ function ProgramDetailView() {
               </div>
             )}
           </Section>
+
+          <Section title="Applications for this activity"
+            action={<Link to="/sk/applications" className="btn btn-ghost btn-sm">Open the review queue</Link>}>
+            {applications.length === 0 ? (
+              <p className="mt-3 text-sm text-[#7A889B]">No youth have applied through their accounts yet.</p>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {applications.map((application) => {
+                  const youth = db.youth.find((y) => y.id === application.youthId);
+                  const submitted = db.submissions.filter((s) => s.applicationId === application.id).length;
+                  const required = db.requirements.filter((r) => r.targetType === 'program' && r.targetId === program.id).length;
+                  return (
+                    <Link key={application.id} to={`/sk/applications/${application.id}`}
+                      className="flex items-center justify-between rounded-lg border border-line px-3 py-2 hover:bg-shell">
+                      <span>
+                        <span className="block text-sm font-medium text-navy-900">{youth ? fullName(youth) : '—'}</span>
+                        <span className="block text-xs text-[#8391A4]">{submitted} / {required} requirement(s) submitted</span>
+                      </span>
+                      <Badge value={APPLICATION_STATUSES[application.status]} />
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </Section>
+
+          <RequirementsEditor targetType="program" targetId={program.id} />
         </div>
 
         <aside className="space-y-4">
@@ -298,37 +325,6 @@ function ProgramDetailView() {
             </Section>
           )}
         </aside>
-
-        <div className="lg:col-span-2">
-          <Section title="Applications for this activity"
-            action={<Link to="/sk/applications" className="btn btn-ghost btn-sm">Open the review queue</Link>}>
-            {applications.length === 0 ? (
-              <p className="mt-3 text-sm text-[#7A889B]">No youth have applied through their accounts yet.</p>
-            ) : (
-              <div className="mt-3 space-y-2">
-                {applications.map((application) => {
-                  const youth = db.youth.find((y) => y.id === application.youthId);
-                  const submitted = db.submissions.filter((s) => s.applicationId === application.id).length;
-                  const required = db.requirements.filter((r) => r.targetType === 'program' && r.targetId === program.id).length;
-                  return (
-                    <Link key={application.id} to={`/sk/applications/${application.id}`}
-                      className="flex items-center justify-between rounded-lg border border-line px-3 py-2 hover:bg-shell">
-                      <span>
-                        <span className="block text-sm font-medium text-navy-900">{youth ? fullName(youth) : '—'}</span>
-                        <span className="block text-xs text-[#8391A4]">{submitted} / {required} requirement(s) submitted</span>
-                      </span>
-                      <Badge value={APPLICATION_STATUSES[application.status]} />
-                    </Link>
-                  );
-                })}
-              </div>
-            )}
-          </Section>
-        </div>
-
-        <div className="lg:col-span-2">
-          <RequirementsEditor targetType="program" targetId={program.id} />
-        </div>
       </div>
     </>
   );
