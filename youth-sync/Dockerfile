@@ -3,9 +3,9 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
-ARG VITE_API_BASE_URL
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+# The browser calls /api on this same site. The server proxies that to the API,
+# so the login cookie is first-party on every browser.
+ENV VITE_API_BASE_URL=/api
 RUN npm run build
-RUN npm install -g serve
 EXPOSE 8080
-CMD ["sh", "-c", "serve -s dist -l tcp://0.0.0.0:${PORT:-8080}"]
+CMD ["node", "server.mjs"]
