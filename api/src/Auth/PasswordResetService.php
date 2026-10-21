@@ -143,7 +143,8 @@ final class PasswordResetService
         }
         $result = $this->email->send($email, $subject, $html, $text);
         if (!($result['ok'] ?? false)) {
-            $this->log('password reset email delivery failed');
+            $reason = trim((string) ($result['error'] ?? 'password reset email delivery failed'));
+            $this->log($reason);
         }
     }
 

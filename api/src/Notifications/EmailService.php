@@ -15,6 +15,10 @@ final class EmailService
         private string $baseUrl = 'https://api.brevo.com',
         private ?EmailTransport $transport = null,
     ) {
+        $this->apiKey = trim($this->apiKey);
+        $this->fromEmail = trim($this->fromEmail);
+        $this->fromName = trim($this->fromName);
+        $this->baseUrl = trim($this->baseUrl);
     }
 
     public function isConfigured(): bool
@@ -79,7 +83,11 @@ final class EmailService
         $status = (int) ($response['httpStatus'] ?? 0);
         $body = (string) ($response['body'] ?? '');
         if ($status < 200 || $status >= 300) {
-            return $this->failed('Email provider rejected the message.');
+            $decoded = json_decode($body, true);
+            $detail = is_array($decoded) ? (string) ($decoded['message'] ?? $decoded['code'] ?? '') : '';
+            $detail = trim(preg_replace('/\s+/', ' ', $detail) ?? '');
+            $suffix = $detail !== '' ? ' ' . substr($detail, 0, 180) : '';
+            return $this->failed('Email provider rejected the message. HTTP ' . $status . $suffix);
         }
         $decoded = json_decode($body, true);
         $reference = null;
