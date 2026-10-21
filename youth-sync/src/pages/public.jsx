@@ -1204,10 +1204,11 @@ export function Pending() {
 
 export function ForgotPassword() {
   const [sent, setSent] = useState(false);
+  const [done, setDone] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const submit = async (event) => {
+  const sendCode = async (event) => {
     event.preventDefault();
     if (busy) return;
     setBusy(true);
@@ -1223,21 +1224,58 @@ export function ForgotPassword() {
     }
   };
 
+  const changePassword = async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    const data = new FormData(event.currentTarget);
+    const token = String(data.get('code') || '').trim();
+    const password = String(data.get('password') || '');
+    const confirm = String(data.get('confirm') || '');
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      setError(passwordError);
+      setBusy(false);
+      return;
+    }
+    if (password !== confirm) {
+      setError('The two passwords do not match.');
+      setBusy(false);
+      return;
+    }
+    try {
+      await api.post('/auth/reset-password', { token, newPassword: password });
+      setDone(true);
+    } catch (err) {
+      setError(err?.message || 'This code is invalid or has expired.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <GuestLayout>
       <div className="card p-6">
         <h1 className="text-lg font-bold text-navy-900">Forgot your password?</h1>
-        <p className="mt-1 text-sm text-[#7A889B]">Enter your email. If that account exists, we will send a link that expires in 30 minutes.</p>
-        {sent && (
-          <p className="mt-4 rounded-card border border-line bg-shell px-4 py-3 text-sm text-navy-700">
-            If an account exists for that email, a reset link has been sent. Open the email and choose a new password. The link expires in 30 minutes.
-          </p>
-        )}
+        <p className="mt-1 text-sm text-[#7A889B]">Enter the email for the account. If it exists, we will send a 6-digit code that expires in 30 minutes.</p>
+        {done && <p className="mt-4 rounded-card border border-line bg-shell px-4 py-3 text-sm text-navy-700">Your password was updated. You can log in with it now.</p>}
         {error && <p className="mt-4 rounded-card border border-[#F0D3D1] bg-[#FCF3F2] px-4 py-3 text-sm text-[#96201A]">{error}</p>}
-        <form className="mt-5 space-y-4" onSubmit={submit}>
-          <Field label="Email"><input className="field" name="email" type="email" required disabled={busy} /></Field>
-          <button type="submit" className="btn btn-primary w-full" disabled={busy}>{busy ? 'Sending…' : 'Send reset instructions'}</button>
-        </form>
+        {!done && (
+          <form className="mt-5 space-y-4" onSubmit={sendCode}>
+            <Field label="Email"><input className="field" name="email" type="email" required disabled={busy || sent} /></Field>
+            {!sent && <button type="submit" className="btn btn-primary w-full" disabled={busy}>{busy ? 'Sending…' : 'Send code'}</button>}
+          </form>
+        )}
+        {!done && sent && (
+          <form className="mt-5 space-y-4" onSubmit={changePassword}>
+            <p className="text-sm text-navy-700">If that account exists, the code is in the inbox. Paste it here, then choose a new password.</p>
+            <Field label="Code"><input className="field" name="code" inputMode="numeric" autoComplete="one-time-code" required disabled={busy} /></Field>
+            <Field label="New password"><input className="field" name="password" type="password" required disabled={busy} /></Field>
+            <Field label="Confirm password"><input className="field" name="confirm" type="password" required disabled={busy} /></Field>
+            <button type="submit" className="btn btn-primary w-full" disabled={busy}>{busy ? 'Saving…' : 'Update password'}</button>
+          </form>
+        )}
         <p className="mt-4 text-sm">
           <Link to="/login" className="text-navy-700 underline">Back to log in</Link>
         </p>

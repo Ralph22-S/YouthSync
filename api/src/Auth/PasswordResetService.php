@@ -43,7 +43,7 @@ final class PasswordResetService
         }
 
         $this->invalidateActive((int) $user['id']);
-        $raw = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
+        $raw = (string) random_int(100000, 999999);
         $hash = hash('sha256', $raw);
         $this->pdo->prepare(
             'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
@@ -58,7 +58,7 @@ final class PasswordResetService
             $this->pdo,
             (int) $user['id'],
             ActivityLog::ACTION_PASSWORD_RESET_REQUESTED,
-            'Requested a password reset link'
+            'Requested a password reset code'
         );
         $this->deliver($email, $raw);
     }
@@ -67,7 +67,7 @@ final class PasswordResetService
     {
         $token = trim($token);
         if ($token === '' || $newPassword === '') {
-            Json::error('VALIDATION_ERROR', 'A reset token and a new password are required.', 422);
+            Json::error('VALIDATION_ERROR', 'The code and a new password are required.', 422);
         }
         if (!Password::isValidNew($newPassword)) {
             Json::error('VALIDATION_ERROR', Password::RULE, 422);
@@ -83,12 +83,12 @@ final class PasswordResetService
         $stmt->execute(['hash' => $hash]);
         $row = $stmt->fetch();
         if ($row === false || $row['used_at'] !== null) {
-            Json::error('RESET_INVALID', 'This reset link is invalid or has expired.', 400);
+            Json::error('RESET_INVALID', 'This code is invalid or has expired.', 400);
         }
 
         $expires = strtotime((string) $row['expires_at']);
         if ($expires === false || $expires < time()) {
-            Json::error('RESET_INVALID', 'This reset link is invalid or has expired.', 400);
+            Json::error('RESET_INVALID', 'This code is invalid or has expired.', 400);
         }
 
         $userId = (int) $row['user_id'];
@@ -96,7 +96,7 @@ final class PasswordResetService
         $user->execute(['id' => $userId]);
         $account = $user->fetch();
         if ($account === false || $account['status'] !== 'active') {
-            Json::error('RESET_INVALID', 'This reset link is invalid or has expired.', 400);
+            Json::error('RESET_INVALID', 'This code is invalid or has expired.', 400);
         }
         if (Password::verify($newPassword, (string) $account['password_hash'])) {
             Json::error('VALIDATION_ERROR', 'Choose a new password that is different from the current password.', 422);
@@ -128,15 +128,11 @@ final class PasswordResetService
 
     private function deliver(string $email, string $rawToken): void
     {
-        $subject = 'Reset your YouthSync password';
-        $link = $this->resetLink($rawToken);
-        $text = 'Reset your YouthSync password within 30 minutes. The link can be used once.'
-            . ($link !== '' ? ' Open: ' . $link : '');
-        $html = '<p>Reset your YouthSync password. This link works once and expires in 30 minutes.</p>';
-        if ($link !== '') {
-            $safeLink = htmlspecialchars($link, ENT_QUOTES, 'UTF-8');
-            $html .= '<p><a href="' . $safeLink . '">Choose a new password</a></p>';
-        }
+        $subject = 'Your YouthSync password code';
+        $safeCode = htmlspecialchars($rawToken, ENT_QUOTES, 'UTF-8');
+        $text = 'Your YouthSync password code is ' . $rawToken . '. It expires in 30 minutes and can be used once.';
+        $html = '<p>Your YouthSync password code is <strong>' . $safeCode . '</strong>.</p>'
+            . '<p>Enter this code on the forgot-password page. It expires in 30 minutes and can be used once.</p>';
         if (!$this->email->isConfigured()) {
             $this->log('password reset email was not sent because the email provider is not configured');
             return;
@@ -166,15 +162,6 @@ final class PasswordResetService
         $stmt->execute(['email' => $email]);
         $row = $stmt->fetch();
         return $row === false ? null : $row;
-    }
-
-    private function resetLink(string $rawToken): string
-    {
-        $origin = rtrim(trim($this->frontendOrigin), '/');
-        if ($origin === '') {
-            return '';
-        }
-        return $origin . '/reset-password?token=' . rawurlencode($rawToken);
     }
 
     private function log(string $message): void
