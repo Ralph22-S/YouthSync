@@ -476,10 +476,7 @@ final class AuthService
 
     private function establishSystemAdminSession(int $userId): void
     {
-        if (session_status() !== PHP_SESSION_ACTIVE) {
-            session_start();
-        }
-        session_regenerate_id(true);
+        $this->startFreshSession();
         $_SESSION[Tenant::SESSION_USER_KEY] = $userId;
         unset($_SESSION[Tenant::SESSION_ORG_KEY], $_SESSION[Tenant::SESSION_YOUTH_KEY]);
         $_SESSION[Tenant::SESSION_ROLE_KEY] = self::ROLE_SYSTEM_ADMIN;
@@ -487,10 +484,7 @@ final class AuthService
 
     private function establishSession(int $userId, int $organizationId, string $roleCode): void
     {
-        if (session_status() !== PHP_SESSION_ACTIVE) {
-            session_start();
-        }
-        session_regenerate_id(true);
+        $this->startFreshSession();
         $_SESSION[Tenant::SESSION_USER_KEY] = $userId;
         $_SESSION[Tenant::SESSION_ORG_KEY] = $organizationId;
         unset($_SESSION[Tenant::SESSION_YOUTH_KEY]);
@@ -499,14 +493,39 @@ final class AuthService
 
     private function establishYouthSession(int $userId, int $youthId): void
     {
-        if (session_status() !== PHP_SESSION_ACTIVE) {
-            session_start();
-        }
-        session_regenerate_id(true);
+        $this->startFreshSession();
         $_SESSION[Tenant::SESSION_USER_KEY] = $userId;
         unset($_SESSION[Tenant::SESSION_ORG_KEY]);
         $_SESSION[Tenant::SESSION_YOUTH_KEY] = $youthId;
         $_SESSION[Tenant::SESSION_ROLE_KEY] = self::ROLE_YOUTH;
+    }
+
+    private function startFreshSession(): void
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            session_start();
+        }
+        session_regenerate_id(true);
+        $name = session_name();
+        $current = session_id();
+        $keep = [];
+        foreach (headers_list() as $header) {
+            if (stripos($header, 'Set-Cookie:') !== 0) {
+                continue;
+            }
+            if (!preg_match('/^Set-Cookie:\s*([^=]+)=([^;]*)/i', $header, $match)) {
+                $keep[] = $header;
+                continue;
+            }
+            if (strcasecmp($match[1], $name) === 0 && !hash_equals($current, $match[2])) {
+                continue;
+            }
+            $keep[] = $header;
+        }
+        header_remove('Set-Cookie');
+        foreach ($keep as $header) {
+            header($header, false);
+        }
     }
 
     private function replaceRememberToken(int $userId, int $organizationId, string $roleCode, bool $remember, int $youthId = 0): void

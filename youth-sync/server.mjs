@@ -63,7 +63,13 @@ const proxyApi = (req, res, url) => {
     const responseHeaders = { ...proxyRes.headers };
     const cookies = proxyRes.headers['set-cookie'];
     if (Array.isArray(cookies)) {
-      responseHeaders['set-cookie'] = cookies.map((cookie) => cookie.replace(/;\s*Domain=[^;]*/i, ''));
+      const byName = new Map();
+      for (const cookie of cookies) {
+        const cleaned = cookie.replace(/;\s*Domain=[^;]*/i, '');
+        const name = cleaned.split('=')[0].trim().toLowerCase();
+        byName.set(name, cleaned);
+      }
+      responseHeaders['set-cookie'] = [...byName.values()];
     }
     res.writeHead(proxyRes.statusCode || 502, responseHeaders);
     proxyRes.pipe(res);
