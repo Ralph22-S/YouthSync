@@ -208,7 +208,9 @@ $controller = new AuthController(
             (string) ($config['brevo_from_name'] ?? 'YouthSync'),
             (string) ($config['brevo_base_url'] ?? 'https://api.brevo.com')
         ),
-        $logFile
+        $logFile,
+        null,
+        (string) ($config['frontend_origin'] ?? '')
     ),
     new YouthSignupService(
         $pdo,

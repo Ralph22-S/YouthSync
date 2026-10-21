@@ -21,6 +21,7 @@ final class PasswordResetService
         private EmailService $email,
         private string $logFile,
         private ?RememberTokenStore $rememberTokens = null,
+        private string $frontendOrigin = '',
     ) {
         if ($this->rememberTokens === null) {
             $this->rememberTokens = new RememberTokenStore(
@@ -128,12 +129,19 @@ final class PasswordResetService
     private function deliver(string $email, string $rawToken): void
     {
         $subject = 'Reset your YouthSync password';
-        $text = 'Use this password reset token within 30 minutes. It can be used once. Token: ' . $rawToken;
+        $link = $this->resetLink($rawToken);
+        $text = 'Reset your YouthSync password within 30 minutes. The link can be used once.'
+            . ($link !== '' ? ' Open: ' . $link : '');
+        $html = '<p>Reset your YouthSync password. This link works once and expires in 30 minutes.</p>';
+        if ($link !== '') {
+            $safeLink = htmlspecialchars($link, ENT_QUOTES, 'UTF-8');
+            $html .= '<p><a href="' . $safeLink . '">Choose a new password</a></p>';
+        }
         if (!$this->email->isConfigured()) {
             $this->log('password reset email was not sent because the email provider is not configured');
             return;
         }
-        $result = $this->email->send($email, $subject, '<p>' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '</p>', $text);
+        $result = $this->email->send($email, $subject, $html, $text);
         if (!($result['ok'] ?? false)) {
             $this->log('password reset email delivery failed');
         }
@@ -157,6 +165,15 @@ final class PasswordResetService
         $stmt->execute(['email' => $email]);
         $row = $stmt->fetch();
         return $row === false ? null : $row;
+    }
+
+    private function resetLink(string $rawToken): string
+    {
+        $origin = rtrim(trim($this->frontendOrigin), '/');
+        if ($origin === '') {
+            return '';
+        }
+        return $origin . '/reset-password?token=' . rawurlencode($rawToken);
     }
 
     private function log(string $message): void
